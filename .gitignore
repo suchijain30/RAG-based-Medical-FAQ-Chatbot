@@ -11,7 +11,7 @@ __pycache__/
 venv/
 
 # FAISS index (large binary files - commit separately or use Git LFS)
-VectorStore/
+
 
 # Data files (usually too large for git)
 data/*.csv
