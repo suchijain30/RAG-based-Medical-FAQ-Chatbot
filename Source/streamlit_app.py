@@ -1,5 +1,5 @@
 """
-streamlit_app.py - MediBot | No login | Auto GPS | Doctor links only when city known
+streamlit_app.py - Phase 2A: Login + Signup + Full persistent memory via Firestore
 Run: streamlit run src/streamlit_app.py
 """
 
@@ -8,9 +8,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
 import datetime
-import requests
-from streamlit.components.v1 import html as st_html
 from rag_pipeline import load_vector_store, initialize_rag_chain, ask_question_cached
+from auth import signup, login, save_message, load_all_messages, delete_history
+
+FIREBASE_READY = bool(os.getenv("FIREBASE_API_KEY") and os.getenv("FIREBASE_PROJECT_ID"))
 
 st.set_page_config(
     page_title="MediBot – AI Health Assistant",
@@ -25,6 +26,7 @@ st.markdown("""
 [data-testid="stSidebar"]          { background: #1a1f36; }
 [data-testid="stSidebar"] *        { color: white !important; }
 [data-testid="stSidebar"] input    { color: #111 !important; }
+
 .medibot-header {
     background: linear-gradient(135deg, #1565c0, #0d47a1);
     padding: 1.2rem 2rem; border-radius: 12px;
@@ -32,6 +34,12 @@ st.markdown("""
 }
 .medibot-header h1 { color: white; margin: 0; font-size: 1.8rem; }
 .medibot-header p  { color: #bbdefb; margin: 0.2rem 0 0; font-size: 0.9rem; }
+
+.auth-wrap {
+    max-width: 420px; margin: 3rem auto;
+    background: white; border-radius: 16px;
+    padding: 2.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+}
 .doctor-card {
     background: #e3f2fd; border-left: 4px solid #1565c0;
     border-radius: 8px; padding: 0.7rem 1rem; margin-top: 0.6rem;
@@ -51,194 +59,262 @@ SPECIALTY_MAP = {
     "child": "Pediatrician", "baby": "Pediatrician",
     "fever": "General Physician", "cold": "General Physician", "flu": "General Physician",
     "cough": "Pulmonologist", "lung": "Pulmonologist", "breathing": "Pulmonologist",
-    "stomach": "Gastroenterologist", "liver": "Gastroenterologist", "digestion": "Gastroenterologist",
+    "stomach": "Gastroenterologist", "liver": "Gastroenterologist",
     "kidney": "Nephrologist", "urine": "Urologist",
     "mental": "Psychiatrist", "anxiety": "Psychiatrist", "depression": "Psychiatrist",
     "cancer": "Oncologist", "tumor": "Oncologist",
     "brain": "Neurologist", "headache": "Neurologist", "migraine": "Neurologist",
     "teeth": "Dentist", "dental": "Dentist",
     "pregnancy": "Gynecologist", "period": "Gynecologist",
-    "dengue": "General Physician", "malaria": "General Physician", "typhoid": "General Physician",
+    "dengue": "General Physician", "malaria": "General Physician",
 }
 
-def detect_specialty(question: str) -> str:
-    q = question.lower()
-    for keyword, specialty in SPECIALTY_MAP.items():
-        if keyword in q:
-            return specialty
+def detect_specialty(q: str) -> str:
+    q = q.lower()
+    for kw, sp in SPECIALTY_MAP.items():
+        if kw in q:
+            return sp
     return "General Physician"
 
-def get_practo_url(city: str, specialty: str) -> str:
-    return f"https://www.practo.com/{city.strip().lower().replace(' ', '-')}/{specialty.lower().replace(' ', '-')}"
+def detect_mode(t: str) -> str:
+    t = t.lower()
+    if any(w in t for w in ["summarize","summarise","simplify","explain this"]):
+        return "summarize"
+    if any(w in t for w in ["generate guide","create report","full overview",
+                              "complete guide","everything about"]):
+        return "report"
+    return "chat"
 
-def get_justdial_url(city: str, specialty: str) -> str:
-    return f"https://www.justdial.com/{city.strip().lower().replace(' ', '+')}/{specialty.lower().replace(' ', '+')}"
+def practo_url(city, sp):
+    return f"https://www.practo.com/{city.lower().replace(' ','-')}/{sp.lower().replace(' ','-')}"
 
-def reverse_geocode(lat: float, lon: float) -> str:
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "json"},
-            headers={"User-Agent": "MediBot/1.0"},
-            timeout=5
-        )
-        addr = r.json().get("address", {})
-        # Priority: city → town → district → state
-        return (addr.get("city") or addr.get("town") or
-                addr.get("state_district") or addr.get("state") or "")
-    except Exception:
-        return ""
+def justdial_url(city, sp):
+    return f"https://www.justdial.com/{city.lower().replace(' ','+')}/{sp.lower().replace(' ','+')}"
 
-# ── Session init ───────────────────────────────────────────────────────────
-for key, val in {
-    "history": [], "city": "", "gps_done": False
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+# ── Session defaults ───────────────────────────────────────────────────────
+DEFAULTS = {
+    "logged_in": False, "user_id": "", "id_token": "",
+    "user_email": "", "city": "", "chat_display": [],
+    "agent_executor": None, "history_loaded": False,
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ── Auto GPS on page load (runs once) ─────────────────────────────────────
-# Injects JS that posts coords into a hidden Streamlit text input
-GPS_JS = """
-<script>
-(function() {
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(function(pos) {
-            var lat = pos.coords.latitude.toFixed(5);
-            var lon = pos.coords.longitude.toFixed(5);
-            // Write to the hidden input Streamlit renders for gps_coords key
-            var inputs = window.parent.document.querySelectorAll('input[type="text"]');
-            inputs.forEach(function(inp) {
-                if (inp.placeholder === '__gps__') {
-                    inp.value = lat + ',' + lon;
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            });
-        }, function(err) {
-            console.log('GPS denied or unavailable:', err.message);
-        }, { timeout: 8000 });
-    }
-})();
-</script>
-"""
-
-# Render GPS JS once on load
-if not st.session_state.gps_done:
-    st_html(GPS_JS, height=0)
-
-# Hidden input to receive GPS coords from JS
-gps_raw = st.text_input("gps", placeholder="__gps__",
-                         key="gps_coords", label_visibility="collapsed")
-
-# Process coords the moment they arrive
-if gps_raw and "," in gps_raw and not st.session_state.gps_done:
-    try:
-        lat, lon = map(float, gps_raw.split(","))
-        detected_city = reverse_geocode(lat, lon)
-        if detected_city:
-            st.session_state.city = detected_city
-        st.session_state.gps_done = True
-    except Exception:
-        st.session_state.gps_done = True
-
-# ── Load pipeline ──────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading MediBot…")
+# ── Load pipeline factory (global, cached) ─────────────────────────────────
+@st.cache_resource(show_spinner="Loading MediBot engine…")
 def load_pipeline():
     try:
         vs = load_vector_store()
     except FileNotFoundError as e:
         st.error(str(e))
         st.stop()
-    return initialize_rag_chain(vs)
+    return initialize_rag_chain(vs)   # returns create_executor factory
 
-qa_chain = load_pipeline()
+create_executor = load_pipeline()
+
+# ══════════════════════════════════════════════════════════════════════════
+# AUTH SCREEN
+# ══════════════════════════════════════════════════════════════════════════
+if not st.session_state.logged_in:
+    st.markdown("""
+    <div class="medibot-header">
+        <h1>💊 MediBot – AI Health Assistant</h1>
+        <p>Agentic RAG · Multi-turn Memory · Persistent History</p>
+    </div>""", unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
+        st.subheader("🔐 Login or Sign Up")
+
+        tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
+
+        # ── Login tab ─────────────────────────────────────────────────
+        with tab_login:
+            email_l    = st.text_input("Email",    key="l_email")
+            password_l = st.text_input("Password", key="l_pass", type="password")
+
+            if st.button("Login", use_container_width=True, type="primary", key="btn_login"):
+                if not email_l or not password_l:
+                    st.error("Please enter email and password.")
+                elif not FIREBASE_READY:
+                    # Dev mode — bypass Firebase
+                    st.session_state.logged_in  = True
+                    st.session_state.user_email = email_l or "demo@medibot.com"
+                    st.session_state.user_id    = "demo_user"
+                    st.rerun()
+                else:
+                    with st.spinner("Logging in…"):
+                        res = login(email_l, password_l)
+                    if res["ok"]:
+                        st.session_state.logged_in  = True
+                        st.session_state.id_token   = res["id_token"]
+                        st.session_state.user_id    = res["user_id"]
+                        st.session_state.user_email = res["email"]
+                        st.rerun()
+                    else:
+                        st.error(res["error"])
+
+        # ── Signup tab ────────────────────────────────────────────────
+        with tab_signup:
+            email_s    = st.text_input("Email",            key="s_email")
+            password_s = st.text_input("Password",         key="s_pass",  type="password")
+            confirm_s  = st.text_input("Confirm Password", key="s_conf",  type="password")
+
+            if st.button("Create Account", use_container_width=True,
+                         type="primary", key="btn_signup"):
+                if not email_s or not password_s:
+                    st.error("Please fill all fields.")
+                elif password_s != confirm_s:
+                    st.error("Passwords do not match.")
+                elif len(password_s) < 6:
+                    st.error("Password must be at least 6 characters.")
+                elif not FIREBASE_READY:
+                    st.warning("Firebase not configured. Add keys to .env to enable signup.")
+                else:
+                    with st.spinner("Creating account…"):
+                        res = signup(email_s, password_s)
+                    if res["ok"]:
+                        st.session_state.logged_in  = True
+                        st.session_state.id_token   = res["id_token"]
+                        st.session_state.user_id    = res["user_id"]
+                        st.session_state.user_email = res["email"]
+                        st.rerun()
+                    else:
+                        st.error(res["error"])
+
+        if not FIREBASE_READY:
+            st.info("ℹ️ Firebase not configured — login works in dev mode only.")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════════════
+# MAIN APP (after login)
+# ══════════════════════════════════════════════════════════════════════════
+
+# Load full history from Firestore on first run after login
+if not st.session_state.history_loaded:
+    past = []
+    if FIREBASE_READY and st.session_state.id_token:
+        with st.spinner("Loading your history…"):
+            past = load_all_messages(
+                st.session_state.user_id,
+                st.session_state.id_token
+            )
+        # Populate chat display (user + assistant pairs)
+        st.session_state.chat_display = [
+            {"role": m["role"], "content": m["content"],
+             "city": m.get("city",""), "specialty": m.get("specialty","")}
+            for m in past
+        ]
+
+    # Create executor and inject ALL past messages into memory
+    st.session_state.agent_executor = create_executor(past_messages=past)
+    st.session_state.history_loaded = True
+
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 💊 MediBot")
-    st.caption("RAG · FAISS · Groq LLaMA-3.3")
-    st.markdown("---")
+    st.markdown(f"### 👤 {st.session_state.user_email}")
+    st.caption("✅ Logged in")
 
-    st.markdown("### 📍 Location")
-    if st.session_state.city:
-        st.success(f"📌 **{st.session_state.city}**")
-        st.caption("Auto-detected via GPS")
-    else:
-        st.warning("📡 Detecting location…\n\nAllow browser location access.")
-
-    # Always allow manual override
-    manual = st.text_input("Override city:", placeholder="e.g. Mumbai, Delhi")
-    if manual.strip():
-        st.session_state.city = manual.strip()
+    if st.button("🚪 Logout", use_container_width=True):
+        for k in DEFAULTS:
+            st.session_state[k] = DEFAULTS[k]
+        st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🕘 History")
-    if st.session_state.history:
-        for chat in reversed(st.session_state.history[-10:]):
-            label = chat["question"][:38] + "…" if len(chat["question"]) > 38 else chat["question"]
-            st.caption(f"🕐 {chat['time']}")
-            st.markdown(f"**{label}**")
-            st.markdown("---")
-        if st.button("🗑️ Clear History", use_container_width=True):
-            st.session_state.history = []
+    st.markdown("### 📍 Your City")
+    city_in = st.text_input("City for doctor links:",
+                             placeholder="e.g. Mumbai, Pune",
+                             value=st.session_state.city)
+    if city_in.strip():
+        st.session_state.city = city_in.strip()
+
+    st.markdown("---")
+    st.markdown("### ✨ What you can ask")
+    st.markdown("""
+- 💬 Any medical question
+- 🔁 Follow-ups (bot remembers context)
+- 📝 *Summarize this:* [paste text]
+- 📋 *Generate a guide for diabetes*
+- 🧮 *BMI for 70kg, 1.75m*
+""")
+    st.markdown("---")
+
+    msg_count = len([m for m in st.session_state.chat_display if m["role"] == "user"])
+    st.caption(f"💬 {msg_count} questions in history")
+
+    if st.session_state.chat_display:
+        if st.button("🗑️ Clear All History", use_container_width=True):
+            if FIREBASE_READY and st.session_state.id_token:
+                with st.spinner("Clearing…"):
+                    delete_history(st.session_state.user_id, st.session_state.id_token)
+            st.session_state.chat_display   = []
+            st.session_state.agent_executor = create_executor(past_messages=[])
             st.rerun()
-    else:
-        st.caption("No history yet.")
 
     st.markdown("---")
-    st.warning("⚠️ For informational purposes only. Consult a doctor for personal advice.")
+    st.warning("⚠️ For informational purposes only.")
+
 
 # ── Header ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="medibot-header">
     <h1>🩺 MediBot – AI Health Assistant</h1>
-    <p>Ask any medical question · Powered by Agentic RAG · Groq LLaMA-3.3</p>
+    <p>Agentic RAG · Full Persistent Memory · Groq LLaMA-3.3</p>
 </div>""", unsafe_allow_html=True)
 
-# ── Chat history ───────────────────────────────────────────────────────────
-for chat in st.session_state.history:
-    with st.chat_message("user"):
-        st.write(chat["question"])
-        st.caption(f"🕐 {chat['time']}")
-
-    with st.chat_message("assistant", avatar="💊"):
-        st.write(chat["answer"])
-
-        # Show doctor links only if city was known at time of question
-        if chat.get("city") and chat.get("specialty"):
+# ── Render chat ────────────────────────────────────────────────────────────
+for msg in st.session_state.chat_display:
+    with st.chat_message(msg["role"],
+                         avatar="💊" if msg["role"] == "assistant" else None):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant" and msg.get("city") and msg.get("specialty"):
             st.markdown(
-                f'<div class="doctor-card">🏥 <b>Find a {chat["specialty"]}</b>'
-                f' near you in <b>{chat["city"]}</b></div>',
+                f'<div class="doctor-card">🏥 <b>Find a {msg["specialty"]}</b>'
+                f' near you in <b>{msg["city"]}</b></div>',
                 unsafe_allow_html=True
             )
             c1, c2 = st.columns(2)
             with c1:
-                st.link_button("🔍 Practo",
-                    get_practo_url(chat["city"], chat["specialty"]),
-                    use_container_width=True)
+                st.link_button("🔍 Practo",   practo_url(msg["city"], msg["specialty"]), use_container_width=True)
             with c2:
-                st.link_button("📋 JustDial",
-                    get_justdial_url(chat["city"], chat["specialty"]),
-                    use_container_width=True)
+                st.link_button("📋 JustDial", justdial_url(msg["city"], msg["specialty"]), use_container_width=True)
 
 # ── Chat input ─────────────────────────────────────────────────────────────
-user_question = st.chat_input("Type your medical question…")
+user_input = st.chat_input("Ask a question, paste text to summarize, or request a patient guide…")
 
-if user_question and user_question.strip():
-    now       = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p")
+if user_input and user_input.strip():
     city      = st.session_state.city
-    specialty = detect_specialty(user_question)
+    specialty = detect_specialty(user_input)
+    mode      = detect_mode(user_input)
 
     with st.chat_message("user"):
-        st.write(user_question)
-        st.caption(f"🕐 {now}")
+        st.markdown(user_input)
+
+    st.session_state.chat_display.append(
+        {"role": "user", "content": user_input, "city": "", "specialty": ""}
+    )
+
+    # Save user message to Firestore
+    if FIREBASE_READY and st.session_state.id_token:
+        save_message(st.session_state.user_id, st.session_state.id_token,
+                     "user", user_input)
+
+    # Get answer
+    spinner_msg = {"summarize": "Summarizing…",
+                   "report": "Generating guide…",
+                   "chat": "Thinking…"}[mode]
 
     with st.chat_message("assistant", avatar="💊"):
-        with st.spinner("Thinking…"):
-            answer, _ = ask_question_cached(qa_chain, user_question)
-        st.write(answer)
+        with st.spinner(spinner_msg):
+            answer, _ = ask_question_cached(st.session_state.agent_executor, user_input)
+        st.markdown(answer)
 
-        # Doctor links — only if city is available
-        if city:
+        if city and mode == "chat":
             st.markdown(
                 f'<div class="doctor-card">🏥 <b>Find a {specialty}</b>'
                 f' near you in <b>{city}</b></div>',
@@ -246,19 +322,17 @@ if user_question and user_question.strip():
             )
             c1, c2 = st.columns(2)
             with c1:
-                st.link_button("🔍 Practo",
-                    get_practo_url(city, specialty),
-                    use_container_width=True)
+                st.link_button("🔍 Practo",   practo_url(city, specialty), use_container_width=True)
             with c2:
-                st.link_button("📋 JustDial",
-                    get_justdial_url(city, specialty),
-                    use_container_width=True)
-        # If no city — show nothing (no info banner either, keep it clean)
+                st.link_button("📋 JustDial", justdial_url(city, specialty), use_container_width=True)
 
-    st.session_state.history.append({
-        "question": user_question,
-        "answer":   answer,
-        "city":     city,
-        "specialty": specialty,
-        "time":     now,
-    })
+    st.session_state.chat_display.append(
+        {"role": "assistant", "content": answer,
+         "city": city if mode == "chat" else "",
+         "specialty": specialty if mode == "chat" else ""}
+    )
+
+    # Save assistant message to Firestore
+    if FIREBASE_READY and st.session_state.id_token:
+        save_message(st.session_state.user_id, st.session_state.id_token,
+                     "assistant", answer, city, specialty)
