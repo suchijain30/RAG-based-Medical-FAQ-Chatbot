@@ -1,11 +1,13 @@
 """
-rag_pipeline.py - Phase 3C: Multilingual + Voice + Image + all prior features
+rag_pipeline.py - Phase 3C: Multilingual + Voice + Image + Persistent Memory + Token Budgeting
 """
 
 import os
 import re
+import json
 import time
 import tempfile
+from pathlib import Path
 from functools import lru_cache
 from difflib import get_close_matches
 from dotenv import load_dotenv
@@ -16,7 +18,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.tools.retriever import create_retriever_tool
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain.tools import Tool
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -25,10 +27,179 @@ from groq import Groq, RateLimitError, AuthenticationError
 load_dotenv()
 
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
-BASE_DIR         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FAISS_INDEX_PATH = os.path.join(BASE_DIR, "VectorStore", "medical_faq_index")
+BASE_DIR         = Path(__file__).resolve().parent.parent
+FAISS_INDEX_PATH = os.getenv("FAISS_INDEX", str(BASE_DIR / "VectorStore" / "medical_faq_index"))
+USER_MEMORY_DIR  = BASE_DIR / "user_memory"
 HF_MODEL_NAME    = "sentence-transformers/all-MiniLM-L6-v2"
-TOP_K            = 5
+TOP_K            = 6
+
+# Ensure user_memory directory exists
+USER_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── Persistent JSON User Memory ─────────────────────────────────────────────
+
+def load_user_memory(user_id: str = "default_user") -> dict:
+    """
+    Load persistent user memory from user_memory/<user_id>.json.
+    Returns default schema if not found or corrupted.
+    """
+    user_file = USER_MEMORY_DIR / f"{user_id}.json"
+    default_memory = {
+        "user_id": user_id,
+        "profile": {
+            "age": None,
+            "gender": None,
+            "conditions": []
+        },
+        "lab_report": "",
+        "history": []
+    }
+    if not user_file.exists():
+        return default_memory
+
+    try:
+        with open(user_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return default_memory
+            if "profile" not in data or not isinstance(data["profile"], dict):
+                data["profile"] = {"age": None, "gender": None, "conditions": []}
+            if "conditions" not in data["profile"] or not isinstance(data["profile"]["conditions"], list):
+                data["profile"]["conditions"] = []
+            if "lab_report" not in data:
+                data["lab_report"] = ""
+            if "history" not in data or not isinstance(data["history"], list):
+                data["history"] = []
+            data["user_id"] = user_id
+            return data
+    except Exception:
+        return default_memory
+
+
+def save_user_memory(user_id: str, memory_data: dict) -> None:
+    """Save persistent user memory to user_memory/<user_id>.json."""
+    USER_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    user_file = USER_MEMORY_DIR / f"{user_id}.json"
+    try:
+        with open(user_file, "w", encoding="utf-8") as f:
+            json.dump(memory_data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Warning: Failed to save user memory for {user_id}: {e}")
+
+
+def save_lab_report(user_id: str, report_text: str) -> None:
+    """Helper to store uploaded lab report analysis in user memory."""
+    memory = load_user_memory(user_id)
+    memory["lab_report"] = report_text.strip()
+    save_user_memory(user_id, memory)
+
+
+def extract_profile_from_text(text: str, current_profile: dict | None = None) -> dict:
+    """
+    Extract profile facts (age, gender, conditions) from user text without a separate LLM call.
+    Updates current_profile in-place and returns it.
+    """
+    if current_profile is None:
+        current_profile = {"age": None, "gender": None, "conditions": []}
+
+    t_lower = text.lower()
+
+    # 1. Age extraction
+    age_patterns = [
+        r"\b(?:i am|i'm|age is|age:?|aged)\s*(?:a\s+)?(\d{1,3})\s*(?:years?|yrs?|yo)?\b",
+        r"\b(\d{1,3})\s*(?:years?[- ]old|yrs?[- ]old|yo)\b",
+        r"\b(\d{1,2})\s*years?\s+of\s+age\b",
+    ]
+    for pat in age_patterns:
+        match = re.search(pat, t_lower)
+        if match:
+            try:
+                val = int(match.group(1))
+                if 0 < val < 120:
+                    current_profile["age"] = val
+                    break
+            except (ValueError, IndexError):
+                pass
+
+    # 2. Gender extraction
+    gender_patterns = [
+        (r"\b(?:i am|i'm)\s+(?:a\s+)?(male|man|boy|gentleman)\b", "Male"),
+        (r"\b(?:i am|i'm)\s+(?:a\s+)?(female|woman|girl|lady)\b", "Female"),
+        (r"\b\d{1,3}\s*(?:years?[- ]old|yrs?[- ]old)?\s*(male|man|boy)\b", "Male"),
+        (r"\b\d{1,3}\s*(?:years?[- ]old|yrs?[- ]old)?\s*(female|woman|girl|lady)\b", "Female"),
+        (r"\b(?:gender|sex)[:\s]+(male|man)\b", "Male"),
+        (r"\b(?:gender|sex)[:\s]+(female|woman)\b", "Female"),
+    ]
+    for pat, g_val in gender_patterns:
+        if re.search(pat, t_lower):
+            current_profile["gender"] = g_val
+            break
+
+    # 3. Medical conditions extraction
+    known_conditions = [
+        "diabetes", "hypertension", "high blood pressure", "low blood pressure",
+        "asthma", "arthritis", "migraine", "thyroid", "hypothyroidism", "hyperthyroidism",
+        "cholesterol", "high cholesterol", "eczema", "psoriasis", "depression",
+        "anxiety", "anemia", "cancer", "gerd", "acid reflux", "obesity", "epilepsy",
+        "tuberculosis", "pneumonia", "bronchitis", "fatty liver", "kidney stone",
+        "osteoporosis", "pcos", "pcod", "sinusitis", "tonsillitis"
+    ]
+
+    existing = set(c.title() for c in current_profile.get("conditions", []))
+
+    for cond in known_conditions:
+        if re.search(rf"\b{re.escape(cond)}\b", t_lower):
+            existing.add(cond.title())
+
+    condition_phrases = [
+        r"\b(?:i have|i've got|diagnosed with|suffering from|living with|history of|treatment for|medication for)\s+([a-zA-Z\s,]+)",
+    ]
+    for pat in condition_phrases:
+        matches = re.finditer(pat, t_lower)
+        for m in matches:
+            phrase = m.group(1).strip()
+            for med in MEDICAL_TERMS:
+                if len(med) >= 4 and re.search(rf"\b{re.escape(med)}\b", phrase):
+                    existing.add(med.title())
+
+    current_profile["conditions"] = sorted(list(existing))
+    return current_profile
+
+
+# ── History Token Budgeting ────────────────────────────────────────────────
+
+def _trim_history(history: list[dict], max_tokens: int = 1800) -> list[dict]:
+    """
+    Trim conversation history to fit within max_tokens budget (1 token ≈ 4 chars).
+    Walks backward through history and cuts off older messages when budget is exceeded.
+    Always preserves a minimum of 2 conversation turns (up to 4 messages if available)
+    so context never completely vanishes.
+    """
+    if not history:
+        return []
+
+    max_chars = max_tokens * 4
+    min_messages = min(len(history), 4)  # Minimum 2 turns (4 messages)
+
+    selected: list[dict] = []
+    current_chars = 0
+
+    # Walk backward from most recent to oldest
+    for i in range(len(history) - 1, -1, -1):
+        msg = history[i]
+        content_len = len(msg.get("content", ""))
+
+        if len(selected) < min_messages or (current_chars + content_len <= max_chars):
+            selected.append(msg)
+            current_chars += content_len
+        else:
+            break
+
+    # Restore chronological order
+    selected.reverse()
+    return selected
+
 
 # ── Voice Transcription (Groq Whisper) ─────────────────────────────────────
 
@@ -113,9 +284,27 @@ def is_followup(question: str) -> bool:
     return any(re.search(p, q) for p in FOLLOWUP_PATTERNS)
 
 
+REPORT_FOLLOWUP_PATTERNS = [
+    r"\bwhat should i (?:eat|avoid|drink|take|do|include|exclude)\b",
+    r"\bwhich (?:food|diet|fruit|vegetable|exercise|medicine|supplement)\b",
+    r"\bcan i (?:eat|drink|have|take|exercise)\b",
+    r"\b(?:diet|nutrition|food|meals?|exercise|workout|routine|lifestyle)\b",
+    r"\b(?:my report|the report|my results?|test results?|lab results?|blood test|values?|levels?|readings?|numbers?)\b",
+    r"\b(?:is (?:it|this) normal|are (?:these|my) (?:levels|values|numbers|results)|what do (?:these|the) (?:numbers|results|values) mean)\b",
+    r"\b(?:advice|recommendations?|suggestions?|tips|precautions?)\b",
+    r"\b(?:based on (?:my|the) (?:report|results|tests?|values))\b",
+    r"\bwhat does (?:it|this) mean\b",
+    r"\bwhat to do next\b",
+]
+
+def _is_followup_about_report(question: str) -> bool:
+    """Detect if the question is asking about recommendations/diet/lifestyle or previous lab report."""
+    q = question.lower()
+    return any(re.search(p, q) for p in REPORT_FOLLOWUP_PATTERNS)
+
+
 # ── Language Detection ────────────────────────────────────────────────────
 
-# Unicode block ranges for common Indian scripts
 _SCRIPT_RANGES = {
     "Hindi":    (0x0900, 0x097F),   # Devanagari
     "Bengali":  (0x0980, 0x09FF),
@@ -130,7 +319,6 @@ _SCRIPT_RANGES = {
     "Arabic":   (0x0600, 0x06FF),   # Urdu uses Arabic script
 }
 
-# Keywords to disambiguate Devanagari (Hindi vs Marathi)
 _MARATHI_MARKERS = [
     "आहे", "मी", "तु", "त्या", "काय", "आहेत",
     "मला", "नाही", "तुम्हाला", "करा",
@@ -138,7 +326,6 @@ _MARATHI_MARKERS = [
 
 def detect_language(text: str) -> str:
     """Detect language from text using Unicode script analysis. Returns language name."""
-    # Count characters in each script range
     script_counts = {}
     for char in text:
         cp = ord(char)
@@ -147,13 +334,11 @@ def detect_language(text: str) -> str:
                 script_counts[lang] = script_counts.get(lang, 0) + 1
 
     if not script_counts:
-        return "English"  # Default: ASCII text
+        return "English"
 
     detected = max(script_counts, key=script_counts.get)
 
-    # Disambiguate Hindi vs Marathi (both Devanagari)
     if detected in ("Hindi", "Marathi"):
-        lower_text = text.lower()
         if any(m in text for m in _MARATHI_MARKERS):
             return "Marathi"
         return "Hindi"
@@ -174,7 +359,7 @@ def load_vector_store(faiss_index_path: str = FAISS_INDEX_PATH) -> FAISS:
     if not os.path.exists(os.path.join(faiss_index_path, "index.faiss")):
         raise FileNotFoundError(
             f"FAISS index not found at '{faiss_index_path}'.\n"
-            "Run: python src/embeddings.py"
+            "Run: python Source/embeddings.py"
         )
     return FAISS.load_local(
         faiss_index_path,
@@ -202,7 +387,6 @@ def _safe_web_search(query: str) -> str:
     except Exception as e:
         err = str(e).lower()
         if "ratelimit" in err or "202" in err or "429" in err:
-            # Wait and retry once
             time.sleep(3)
             try:
                 return DuckDuckGoSearchRun().run(query)
@@ -216,7 +400,6 @@ def _safe_web_search(query: str) -> str:
 
 
 def _build_tools(vectorstore: FAISS) -> list:
-
     retriever_tool = create_retriever_tool(
         vectorstore.as_retriever(
             search_type="similarity",
@@ -296,26 +479,20 @@ def _build_tools(vectorstore: FAISS) -> list:
 
 
 def _build_user_context_summary(past_messages: list[dict]) -> str:
-    """
-    Build a concise summary of what we know about this user
-    from their past conversations — injected as system context.
-    This is the KEY fix for cross-session memory.
-    """
+    """Extract summary from past messages if available."""
     if not past_messages:
         return ""
 
-    # Extract user messages only to build context
-    user_msgs = [m["content"] for m in past_messages if m["role"] == "user"]
+    user_msgs = [m["content"] for m in past_messages if m.get("role") == "user"]
     if not user_msgs:
         return ""
 
-    # Use LLM to summarize what we know about the user
     summary_prompt = (
         "From these past medical conversations, extract key facts about this user "
         "(age, gender, existing conditions, medications, family history, location, "
         "dietary preferences, past symptoms). Be concise, bullet points only, "
         "max 100 words. If nothing personal, say 'No personal context found.':\n\n"
-        + "\n".join(user_msgs[-30:])  # last 30 user messages max
+        + "\n".join(user_msgs[-30:])
     )
 
     try:
@@ -329,7 +506,7 @@ def _build_user_context_summary(past_messages: list[dict]) -> str:
 
 
 def initialize_rag_chain(vectorstore: FAISS):
-    """Returns factory: create_executor(past_messages=[])"""
+    """Returns factory: create_executor(past_messages=[], user_profile={}, lab_report='')"""
     if not GROQ_API_KEY:
         raise EnvironmentError(
             "GROQ_API_KEY not set.\nGet a free key at: https://console.groq.com"
@@ -338,42 +515,49 @@ def initialize_rag_chain(vectorstore: FAISS):
     tools = _build_tools(vectorstore)
     llm   = _get_llm()
 
-    def create_executor(past_messages: list[dict] | None = None) -> AgentExecutor:
-        """
-        Creates AgentExecutor with full persistent memory.
-        past_messages: ALL messages from Firestore for this user.
-
-        Two-layer memory approach:
-        1. User context summary → injected in system prompt (who is this user)
-        2. Recent messages (last 20) → injected as chat_history (conversation flow)
-        """
+    def create_executor(past_messages: list[dict] | None = None,
+                        user_profile: dict | None = None,
+                        lab_report: str = "") -> AgentExecutor:
         past_messages = past_messages or []
+        user_profile = user_profile or {}
 
-        # Layer 1: Build user profile summary from ALL past messages
-        user_context = _build_user_context_summary(past_messages)
+        # Layer 1: Build profile summary
+        profile_parts = []
+        if user_profile.get("age"):
+            profile_parts.append(f"Age: {user_profile['age']}")
+        if user_profile.get("gender"):
+            profile_parts.append(f"Gender: {user_profile['gender']}")
+        if user_profile.get("conditions"):
+            profile_parts.append(f"Conditions: {', '.join(user_profile['conditions'])}")
 
-        # Layer 2: Keep last 20 messages as direct chat history
-        recent = past_messages[-20:] if len(past_messages) > 20 else past_messages
+        user_context = "; ".join(profile_parts) if profile_parts else ""
 
-        # Build ChatMessageHistory from recent messages
+        # Layer 2: Trim history to 1800 token budget
+        trimmed = _trim_history(past_messages, max_tokens=1800)
         history = ChatMessageHistory()
-        for msg in recent:
-            if msg["role"] == "user":
-                history.add_user_message(msg["content"])
-            elif msg["role"] == "assistant":
-                history.add_ai_message(msg["content"])
+        for msg in trimmed:
+            if msg.get("role") == "user":
+                history.add_user_message(msg.get("content", ""))
+            elif msg.get("role") == "assistant":
+                history.add_ai_message(msg.get("content", ""))
 
-        # System prompt includes user context summary
         system_content = (
             "You are MediBot, a concise and responsible medical FAQ assistant.\n\n"
         )
 
         if user_context:
             system_content += (
-                f"KNOWN USER CONTEXT (from previous sessions):\n{user_context}\n\n"
-                "Use this context to personalise your answers. "
+                f"KNOWN USER PROFILE:\n{user_context}\n\n"
+                "Use this profile to personalize your answers. "
                 "If user asks 'do you remember me' or 'what do you know about me', "
-                "refer to this context and summarise what you know.\n\n"
+                "refer to this profile and summarize what you know.\n\n"
+            )
+
+        if lab_report:
+            system_content += (
+                f"LATEST USER LAB REPORT / MEDICAL OBSERVATION:\n{lab_report}\n\n"
+                "When the user asks follow-up questions about diet, lifestyle, what to eat, "
+                "or next steps, refer to this lab report to give context-aware recommendations.\n\n"
             )
 
         system_content += (
@@ -413,9 +597,9 @@ def initialize_rag_chain(vectorstore: FAISS):
             return_intermediate_steps=False
         )
 
-        # Attach history and metadata to executor
         executor._chat_history    = history
         executor._user_context    = user_context
+        executor._lab_report      = lab_report
         executor._all_past_count  = len(past_messages)
 
         return executor
@@ -423,22 +607,31 @@ def initialize_rag_chain(vectorstore: FAISS):
     return create_executor
 
 
-def _direct_llm_answer(question: str, history: ChatMessageHistory,
-                        user_context: str = "") -> str:
-    """Direct LLM call for follow-up questions — no tool needed."""
+def _direct_llm_answer(question: str, history_messages: list,
+                        user_context: str = "", lab_report: str = "") -> str:
+    """Direct LLM call for follow-up or report questions — fast and context-rich."""
     system = (
-        "You are MediBot, a responsible medical assistant. "
-        "Answer the follow-up question using the conversation context. "
-        "Give practical, specific advice (diet, exercise, lifestyle). "
+        "You are MediBot, a responsible and knowledgeable medical assistant. "
+        "Answer the follow-up question using the conversation context and any available medical reports. "
+        "Give practical, specific advice (diet, exercise, lifestyle, precautions). "
         "Keep it clear and under 200 words. "
-        "End with: 'Please consult a healthcare professional for personalised advice.'"
+        "End with: 'Please consult a healthcare professional for personalized advice.'"
     )
     if user_context:
-        system += f"\n\nKnown user context:\n{user_context}"
+        system += f"\n\nKnown user profile:\n{user_context}"
+    if lab_report:
+        system += f"\n\nUser's uploaded lab report / test data:\n{lab_report}"
+
+    if isinstance(history_messages, ChatMessageHistory):
+        msg_list = history_messages.messages
+    elif isinstance(history_messages, list):
+        msg_list = history_messages
+    else:
+        msg_list = []
 
     messages = (
         [SystemMessage(content=system)]
-        + history.messages
+        + msg_list
         + [HumanMessage(content=question)]
     )
 
@@ -449,52 +642,102 @@ def _direct_llm_answer(question: str, history: ChatMessageHistory,
         return f"⚠️ Error: {str(e)}"
 
 
-def ask_question_cached(executor: AgentExecutor, question: str) -> tuple[str, list]:
-    corrected     = fuzzy_correct(question)
-    history       = getattr(executor, "_chat_history",   ChatMessageHistory())
-    user_context  = getattr(executor, "_user_context",   "")
-    past_count    = getattr(executor, "_all_past_count",  0)
+def ask_question(question: str, user_id: str = "default_user", executor: AgentExecutor = None) -> tuple[str, list]:
+    """
+    Main query function with persistent JSON memory, lab report context injection,
+    history trimming (1800 token budget), and multi-turn chat history.
+    """
+    if executor is not None and callable(executor) and not hasattr(executor, "invoke"):
+        try:
+            executor = executor()
+        except Exception:
+            pass
 
-    # Handle "do you remember me" type questions
-    memory_triggers = ["remember me", "know about me", "my history",
-                       "previous session", "last time", "before"]
+    corrected = fuzzy_correct(question)
+    memory = load_user_memory(user_id)
+
+    # 1. Auto-extract profile facts (age, gender, conditions)
+    extract_profile_from_text(question, memory["profile"])
+
+    # 2. Check for lab report context injection
+    lab_report = memory.get("lab_report", "")
+    is_report_q = bool(lab_report and _is_followup_about_report(question))
+
+    # Build profile context
+    profile_items = []
+    if memory["profile"].get("age"):
+        profile_items.append(f"Age: {memory['profile']['age']}")
+    if memory["profile"].get("gender"):
+        profile_items.append(f"Gender: {memory['profile']['gender']}")
+    if memory["profile"].get("conditions"):
+        profile_items.append(f"Conditions: {', '.join(memory['profile']['conditions'])}")
+    user_context = "; ".join(profile_items)
+
+    # 3. Trim history to 1800 token budget (min 2 turns)
+    trimmed_history = _trim_history(memory.get("history", []), max_tokens=1800)
+
+    # Convert trimmed history to LangChain message objects
+    history_messages = []
+    for msg in trimmed_history:
+        if msg.get("role") == "user":
+            history_messages.append(HumanMessage(content=msg.get("content", "")))
+        elif msg.get("role") == "assistant":
+            history_messages.append(AIMessage(content=msg.get("content", "")))
+
+    # Handle memory inquiry triggers
+    memory_triggers = ["remember me", "know about me", "my history", "previous session", "last time", "before"]
     if any(t in corrected.lower() for t in memory_triggers):
-        if user_context:
+        past_count = len(memory.get("history", []))
+        if user_context or lab_report:
+            details = []
+            if user_context:
+                details.append(f"• Profile: {user_context}")
+            if lab_report:
+                details.append(f"• Lab Report / Test on file: {lab_report[:120]}...")
             answer = (
-                f"Yes! Based on our previous conversations, here's what I know about you:\n\n"
-                f"{user_context}\n\n"
-                f"You have {past_count} messages in your history. "
-                f"Please consult a healthcare professional for personalised advice."
+                f"Yes! Based on your saved profile and previous conversations:\n\n"
+                + "\n".join(details) +
+                f"\n\nYou have {past_count} messages in your history. "
+                "Please consult a healthcare professional for personalized advice."
             )
         else:
             answer = (
-                "I have access to your conversation history but haven't found specific "
-                "personal details yet. As you share more information, I'll remember it "
-                "across all your sessions. Please consult a healthcare professional."
+                "I have access to your conversation history but haven't recorded specific "
+                "personal profile details yet. As you share your age, conditions, or reports, "
+                "I will remember them across sessions. Please consult a healthcare professional."
             )
-        history.add_user_message(corrected)
-        history.add_ai_message(answer)
+        memory["history"].append({"role": "user", "content": question})
+        memory["history"].append({"role": "assistant", "content": answer})
+        save_user_memory(user_id, memory)
         return answer, []
 
+    effective_input = corrected
+    if is_report_q:
+        effective_input = (
+            f"[CONTEXT: The user has uploaded the following medical report/test results: {lab_report}]\n\n"
+            f"User Question: {corrected}"
+        )
+
     try:
-        # Follow-up → direct LLM (no tool call needed)
-        if is_followup(corrected) and len(history.messages) > 0:
-            answer = _direct_llm_answer(corrected, history, user_context)
-        else:
+        if (is_followup(corrected) or is_report_q) and len(history_messages) > 0:
+            answer = _direct_llm_answer(effective_input, history_messages, user_context, lab_report)
+        elif executor is not None and hasattr(executor, "invoke"):
             result = executor.invoke({
-                "input": corrected,
-                "chat_history": history.messages
+                "input": effective_input,
+                "chat_history": history_messages
             })
             answer = result.get("output", "No answer returned.")
-
             if not answer or "agent stopped" in answer.lower():
                 answer = (
                     "I wasn't able to find a specific answer in my knowledge base. "
                     "Please consult a qualified healthcare professional."
                 )
+        else:
+            answer = _direct_llm_answer(effective_input, history_messages, user_context, lab_report)
 
-        history.add_user_message(corrected)
-        history.add_ai_message(answer)
+        memory["history"].append({"role": "user", "content": question})
+        memory["history"].append({"role": "assistant", "content": answer})
+        save_user_memory(user_id, memory)
         return answer, []
 
     except RateLimitError:
@@ -504,8 +747,16 @@ def ask_question_cached(executor: AgentExecutor, question: str) -> tuple[str, li
     except Exception as e:
         err = str(e)
         if "failed_generation" in err or "function" in err.lower():
-            answer = _direct_llm_answer(corrected, history, user_context)
-            history.add_user_message(corrected)
-            history.add_ai_message(answer)
+            answer = _direct_llm_answer(effective_input, history_messages, user_context, lab_report)
+            memory["history"].append({"role": "user", "content": question})
+            memory["history"].append({"role": "assistant", "content": answer})
+            save_user_memory(user_id, memory)
             return answer, []
         return f"⚠️ Unexpected error: {err}", []
+
+
+def ask_question_cached(executor, question: str, user_id: str = "default_user") -> tuple[str, list]:
+    """Backward-compatible wrapper around ask_question."""
+    if hasattr(executor, "_user_id") and getattr(executor, "_user_id"):
+        user_id = getattr(executor, "_user_id")
+    return ask_question(question=question, user_id=user_id, executor=executor)

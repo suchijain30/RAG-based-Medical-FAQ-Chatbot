@@ -10,7 +10,7 @@ import streamlit as st
 import datetime
 from rag_pipeline import (
     load_vector_store, initialize_rag_chain, ask_question_cached,
-    transcribe_audio, detect_language
+    transcribe_audio, detect_language, save_lab_report
 )
 from vision import analyze_medical_image, get_mime_type
 from auth import signup, login, save_message, load_all_messages, delete_history
@@ -393,6 +393,10 @@ if image_analysis and image_question_text:
         {"role": "assistant", "content": image_analysis, "city": "", "specialty": ""}
     )
 
+    # Save to persistent user memory
+    user_id = st.session_state.user_id or "default_user"
+    save_lab_report(user_id, image_analysis)
+
     # Save to Firestore
     if FIREBASE_READY and st.session_state.id_token:
         save_message(st.session_state.user_id, st.session_state.id_token,
@@ -404,6 +408,7 @@ if user_input and user_input.strip():
     city      = st.session_state.city
     specialty = detect_specialty(user_input)
     mode      = detect_mode(user_input)
+    user_id   = st.session_state.user_id or "default_user"
 
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -424,7 +429,7 @@ if user_input and user_input.strip():
 
     with st.chat_message("assistant", avatar="💊"):
         with st.spinner(spinner_msg):
-            answer, _ = ask_question_cached(st.session_state.agent_executor, user_input)
+            answer, _ = ask_question_cached(st.session_state.agent_executor, user_input, user_id=user_id)
         st.markdown(answer)
 
         if city and mode == "chat":

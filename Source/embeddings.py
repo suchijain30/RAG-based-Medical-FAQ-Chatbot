@@ -1,9 +1,10 @@
 """
 embeddings.py – Build and save FAISS vector store from cleaned CSV.
-Usage: python src/embeddings.py
+Usage: python Source/embeddings.py
 """
 
 import os
+from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -11,9 +12,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_INPUT = os.path.join(BASE_DIR, "Data", "medical_faqs_clean.csv")
-DEFAULT_INDEX = os.path.join(BASE_DIR, "VectorStore", "medical_faq_index")
+BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_INPUT = os.getenv("CSV_FILE", str(BASE_DIR / "Data" / "medical_faqs_clean.csv"))
+DEFAULT_INDEX = os.getenv("FAISS_INDEX", str(BASE_DIR / "VectorStore" / "medical_faq_index"))
 
 HF_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 512       # Smaller chunks → better retrieval precision
@@ -60,10 +61,10 @@ def create_vector_store(
     embeddings = HuggingFaceEmbeddings(
         model_name=HF_MODEL_NAME,
         model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True, "batch_size": BATCH_SIZE}
+        encode_kwargs={"normalize_embeddings": True, "batch_size": 64}
     )
 
-    # Build FAISS index in one shot (no multiprocessing — avoids pickling errors)
+    # Build FAISS index in one shot (single-process batched — avoids pickling errors on Win/Mac)
     print("Building FAISS index…")
     texts = [d.page_content for d in documents]
     metas = [d.metadata for d in documents]

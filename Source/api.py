@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rag_pipeline import (
     load_vector_store, initialize_rag_chain, ask_question_cached,
-    transcribe_audio, detect_language,
+    transcribe_audio, detect_language, save_lab_report,
 )
 from vision import analyze_medical_image, get_mime_type
 from auth import (
@@ -190,6 +190,7 @@ def _get_or_create_executor(user_id: str, id_token: str):
     # Load history from Firestore and create executor
     past = load_all_messages(user_id, id_token)
     executor = _create_executor(past_messages=past)
+    executor._user_id = user_id
     _executor_cache[user_id] = executor
     return executor
 
@@ -232,7 +233,7 @@ async def api_chat(req: ChatRequest, auth: dict = Depends(_get_auth)):
     id_token = auth["id_token"]
 
     executor = _get_or_create_executor(user_id, id_token)
-    answer, _ = ask_question_cached(executor, req.message)
+    answer, _ = ask_question_cached(executor, req.message, user_id=user_id)
 
     specialty = _detect_specialty(req.message)
     language = detect_language(req.message)
@@ -271,7 +272,7 @@ async def api_voice_chat(
 
     # Chat with transcribed text
     executor = _get_or_create_executor(user_id, id_token)
-    answer, _ = ask_question_cached(executor, transcribed)
+    answer, _ = ask_question_cached(executor, transcribed, user_id=user_id)
 
     specialty = _detect_specialty(transcribed)
     language = detect_language(transcribed)
@@ -318,6 +319,9 @@ async def api_image_analysis(
 
     if analysis.startswith("⚠️"):
         raise HTTPException(status_code=400, detail=analysis)
+
+    # Save lab report into persistent user memory
+    save_lab_report(user_id, analysis)
 
     # Save to Firestore
     q_text = question if question else f"[Uploaded image: {image.filename}]"

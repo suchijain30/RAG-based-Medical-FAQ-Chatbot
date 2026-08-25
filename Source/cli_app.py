@@ -1,6 +1,6 @@
 """
 cli_app.py – Lightweight CLI for MediBot.
-Usage: python src/cli_app.py [--show-sources]
+Usage: python Source/cli_app.py [--show-sources]
 """
 
 import sys
@@ -37,7 +37,7 @@ def main(show_sources: bool = False):
             print("Goodbye! Stay healthy 👋")
             break
 
-        answer, sources = ask_question_cached(qa_chain, user_input)
+        answer, sources = ask_question_cached(qa_chain, user_input, user_id="cli_user")
         print(f"\nMediBot: {answer}\n")
 
         if show_sources:
