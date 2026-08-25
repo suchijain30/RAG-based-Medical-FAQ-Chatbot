@@ -1,6 +1,6 @@
 """
-streamlit_app.py - Phase 2A: Login + Signup + Full persistent memory via Firestore
-Run: streamlit run src/streamlit_app.py
+streamlit_app.py - Phase 3C: Multilingual + Voice + Image + Login + Full persistent memory
+Run: streamlit run Source/streamlit_app.py
 """
 
 import sys, os
@@ -8,7 +8,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
 import datetime
-from rag_pipeline import load_vector_store, initialize_rag_chain, ask_question_cached
+from rag_pipeline import (
+    load_vector_store, initialize_rag_chain, ask_question_cached,
+    transcribe_audio, detect_language
+)
+from vision import analyze_medical_image, get_mime_type
 from auth import signup, login, save_message, load_all_messages, delete_history
 
 FIREBASE_READY = bool(os.getenv("FIREBASE_API_KEY") and os.getenv("FIREBASE_PROJECT_ID"))
@@ -238,6 +242,8 @@ with st.sidebar:
     st.markdown("""
 - 💬 Any medical question
 - 🔁 Follow-ups (bot remembers context)
+- 🎙️ **Speak** your question (voice input)
+- 📷 **Upload** symptom photo / prescription
 - 📝 *Summarize this:* [paste text]
 - 📋 *Generate a guide for diabetes*
 - 🧮 *BMI for 70kg, 1.75m*
@@ -257,6 +263,17 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # Language indicator — detect from last user message
+    last_user_msgs = [m["content"] for m in st.session_state.chat_display if m["role"] == "user"]
+    if last_user_msgs:
+        detected_lang = detect_language(last_user_msgs[-1])
+        lang_emoji = {"Hindi": "🇮🇳", "Marathi": "🇮🇳", "Bengali": "🇮🇳",
+                      "Tamil": "🇮🇳", "Telugu": "🇮🇳", "Kannada": "🇮🇳",
+                      "Malayalam": "🇮🇳", "Gujarati": "🇮🇳", "Punjabi": "🇮🇳",
+                      "English": "🇬🇧"}.get(detected_lang, "🌐")
+        st.caption(f"{lang_emoji} Language: {detected_lang}")
+
     st.warning("⚠️ For informational purposes only.")
 
 
@@ -264,7 +281,7 @@ with st.sidebar:
 st.markdown("""
 <div class="medibot-header">
     <h1>🩺 MediBot – AI Health Assistant</h1>
-    <p>Agentic RAG · Full Persistent Memory · Groq LLaMA-3.3</p>
+    <p>Agentic RAG · Voice & Image · Multilingual · Groq Qwen-3.6</p>
 </div>""", unsafe_allow_html=True)
 
 # ── Render chat ────────────────────────────────────────────────────────────
@@ -284,8 +301,104 @@ for msg in st.session_state.chat_display:
             with c2:
                 st.link_button("📋 JustDial", justdial_url(msg["city"], msg["specialty"]), use_container_width=True)
 
-# ── Chat input ─────────────────────────────────────────────────────────────
+# ── Voice input ──────────────────────────────────────────────────────────────────
+
+with st.expander("🎙️ Voice Input — Speak your question", expanded=False):
+    audio_value = st.audio_input(
+        "Record your medical question",
+        key="voice_input"
+    )
+    if audio_value is not None:
+        # Show playback so user can verify
+        st.audio(audio_value, format="audio/wav")
+
+        if st.button("📤 Transcribe & Send", type="primary", key="btn_transcribe"):
+            with st.spinner("🎙️ Transcribing your voice..."):
+                audio_bytes = audio_value.getvalue()
+                transcribed_text = transcribe_audio(audio_bytes)
+
+            if transcribed_text.startswith("⚠️"):
+                st.error(transcribed_text)
+            else:
+                st.success(f'🗒️ Transcribed: "{transcribed_text}"')
+                st.session_state["voice_query"] = transcribed_text
+                st.rerun()
+
+# Process voice query if it was just transcribed
+voice_query = st.session_state.pop("voice_query", None)
+
+# ── Image input ──────────────────────────────────────────────────────────────────
+
+with st.expander("📷 Image Input — Upload a symptom photo, prescription, or lab report", expanded=False):
+    uploaded_image = st.file_uploader(
+        "Upload a medical image",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="image_upload",
+        help="Supports: skin conditions, prescriptions, lab reports"
+    )
+    image_question = st.text_input(
+        "Optional: Ask something about this image",
+        placeholder="e.g. What is this rash? / Read this prescription",
+        key="image_question"
+    )
+
+    if uploaded_image is not None:
+        st.image(uploaded_image, caption="Uploaded image", width=300)
+
+        if st.button("🔍 Analyze Image", type="primary", key="btn_analyze_img"):
+            with st.spinner("📷 Analyzing your image..."):
+                img_bytes = uploaded_image.getvalue()
+                mime = get_mime_type(uploaded_image.name)
+                analysis = analyze_medical_image(
+                    img_bytes,
+                    user_question=image_question,
+                    mime_type=mime
+                )
+
+            if analysis.startswith("⚠️"):
+                st.error(analysis)
+            else:
+                # Store analysis to display as chat message
+                st.session_state["image_analysis"] = analysis
+                st.session_state["image_question_text"] = (
+                    image_question if image_question
+                    else f"[Uploaded image: {uploaded_image.name}]"
+                )
+                st.rerun()
+
+# Process image analysis if it was just completed
+image_analysis = st.session_state.pop("image_analysis", None)
+image_question_text = st.session_state.pop("image_question_text", None)
+
+# ── Chat input ─────────────────────────────────────────────────────────────────
 user_input = st.chat_input("Ask a question, paste text to summarize, or request a patient guide…")
+
+# Voice input takes priority if present
+if voice_query and not user_input:
+    user_input = voice_query
+
+# ── Handle image analysis result ───────────────────────────────────────────
+if image_analysis and image_question_text:
+    # Show user message
+    with st.chat_message("user"):
+        st.markdown(f"📷 {image_question_text}")
+    st.session_state.chat_display.append(
+        {"role": "user", "content": f"📷 {image_question_text}", "city": "", "specialty": ""}
+    )
+
+    # Show analysis result
+    with st.chat_message("assistant", avatar="💊"):
+        st.markdown(image_analysis)
+    st.session_state.chat_display.append(
+        {"role": "assistant", "content": image_analysis, "city": "", "specialty": ""}
+    )
+
+    # Save to Firestore
+    if FIREBASE_READY and st.session_state.id_token:
+        save_message(st.session_state.user_id, st.session_state.id_token,
+                     "user", f"📷 {image_question_text}")
+        save_message(st.session_state.user_id, st.session_state.id_token,
+                     "assistant", image_analysis)
 
 if user_input and user_input.strip():
     city      = st.session_state.city

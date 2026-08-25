@@ -1,10 +1,11 @@
 """
-rag_pipeline.py - Phase 2C: Fixed persistent memory + DuckDuckGo rate limit handling
+rag_pipeline.py - Phase 3C: Multilingual + Voice + Image + all prior features
 """
 
 import os
 import re
 import time
+import tempfile
 from functools import lru_cache
 from difflib import get_close_matches
 from dotenv import load_dotenv
@@ -19,7 +20,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain.tools import Tool
 from langchain_community.chat_message_histories import ChatMessageHistory
-from groq import RateLimitError, AuthenticationError
+from groq import Groq, RateLimitError, AuthenticationError
 
 load_dotenv()
 
@@ -28,6 +29,44 @@ BASE_DIR         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAISS_INDEX_PATH = os.path.join(BASE_DIR, "VectorStore", "medical_faq_index")
 HF_MODEL_NAME    = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K            = 5
+
+# ── Voice Transcription (Groq Whisper) ─────────────────────────────────────
+
+def transcribe_audio(audio_bytes: bytes, filename: str = "recording.wav") -> str:
+    """
+    Transcribe audio bytes to text using Groq Whisper API.
+    Returns transcribed text or error message.
+    """
+    if not GROQ_API_KEY:
+        return "⚠️ GROQ_API_KEY not set. Cannot transcribe audio."
+
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        transcription = client.audio.transcriptions.create(
+            file=(filename, audio_bytes),
+            model="whisper-large-v3-turbo",
+            prompt=(
+                "Medical consultation transcript. Common terms: "
+                "diabetes, hypertension, dengue, malaria, tuberculosis, "
+                "pneumonia, asthma, migraine, arthritis, cholesterol, "
+                "thyroid, insulin, paracetamol, ibuprofen, metformin."
+            ),
+            response_format="text",
+            language="en",
+            temperature=0.0,
+        )
+        text = transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+        if not text:
+            return "⚠️ Could not detect any speech. Please try again."
+        return text
+    except RateLimitError:
+        return "⚠️ Whisper rate limit reached. Please wait a moment and try again."
+    except Exception as e:
+        err = str(e)
+        if "audio" in err.lower() or "format" in err.lower():
+            return "⚠️ Unsupported audio format. Please record again."
+        return f"⚠️ Transcription error: {err}"
+
 
 MEDICAL_TERMS = [
     "dengue","malaria","diabetes","hypertension","tuberculosis","pneumonia",
@@ -72,6 +111,54 @@ FOLLOWUP_PATTERNS = [
 def is_followup(question: str) -> bool:
     q = question.lower()
     return any(re.search(p, q) for p in FOLLOWUP_PATTERNS)
+
+
+# ── Language Detection ────────────────────────────────────────────────────
+
+# Unicode block ranges for common Indian scripts
+_SCRIPT_RANGES = {
+    "Hindi":    (0x0900, 0x097F),   # Devanagari
+    "Bengali":  (0x0980, 0x09FF),
+    "Tamil":    (0x0B80, 0x0BFF),
+    "Telugu":   (0x0C00, 0x0C7F),
+    "Kannada":  (0x0C80, 0x0CFF),
+    "Malayalam":(0x0D00, 0x0D7F),
+    "Gujarati": (0x0A80, 0x0AFF),
+    "Punjabi":  (0x0A00, 0x0A7F),   # Gurmukhi
+    "Odia":     (0x0B00, 0x0B7F),
+    "Marathi":  (0x0900, 0x097F),   # Uses Devanagari — disambiguated by keywords
+    "Arabic":   (0x0600, 0x06FF),   # Urdu uses Arabic script
+}
+
+# Keywords to disambiguate Devanagari (Hindi vs Marathi)
+_MARATHI_MARKERS = [
+    "आहे", "मी", "तु", "त्या", "काय", "आहेत",
+    "मला", "नाही", "तुम्हाला", "करा",
+]
+
+def detect_language(text: str) -> str:
+    """Detect language from text using Unicode script analysis. Returns language name."""
+    # Count characters in each script range
+    script_counts = {}
+    for char in text:
+        cp = ord(char)
+        for lang, (start, end) in _SCRIPT_RANGES.items():
+            if start <= cp <= end:
+                script_counts[lang] = script_counts.get(lang, 0) + 1
+
+    if not script_counts:
+        return "English"  # Default: ASCII text
+
+    detected = max(script_counts, key=script_counts.get)
+
+    # Disambiguate Hindi vs Marathi (both Devanagari)
+    if detected in ("Hindi", "Marathi"):
+        lower_text = text.lower()
+        if any(m in text for m in _MARATHI_MARKERS):
+            return "Marathi"
+        return "Hindi"
+
+    return detected
 
 
 @lru_cache(maxsize=1)
@@ -300,7 +387,11 @@ def initialize_rag_chain(vectorstore: FAISS):
             "7. Keep answers 3-5 sentences unless generating a guide.\n"
             "8. End medical answers with: 'Please consult a healthcare professional.'\n"
             "9. Never make up information.\n"
-            "10. This user's data is private — never mix with other users' info."
+            "10. This user's data is private — never mix with other users' info.\n"
+            "11. MULTILINGUAL: If the user writes in a non-English language "
+            "(Hindi, Marathi, Bengali, Tamil, Telugu, Kannada, Malayalam, Gujarati, "
+            "Punjabi, Odia, Urdu, or any other language), you MUST respond in that "
+            "same language. Keep medical terms in English but explain in their language."
         )
 
         prompt = ChatPromptTemplate.from_messages([
