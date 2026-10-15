@@ -27,6 +27,8 @@ from vision import analyze_medical_image, get_mime_type
 from auth import (
     signup as firebase_signup,
     login as firebase_login,
+    verify_id_token,
+    FirebaseAuthUnavailable,
     save_message, load_all_messages, delete_history,
 )
 
@@ -173,13 +175,22 @@ def _doctor_links(city: str, specialty: str) -> dict:
 # ── Auth dependency ──────────────────────────────────────────────────────
 
 def _get_auth(
-    x_user_id: str = Header(..., alias="X-User-Id"),
-    x_id_token: str = Header(..., alias="X-Id-Token"),
+    x_user_id: str = Header(default="", alias="X-User-Id"),
+    x_id_token: str = Header(default="", alias="X-Id-Token"),
 ) -> dict:
-    """Extract user auth from request headers."""
-    if not x_user_id or not x_id_token:
-        raise HTTPException(status_code=401, detail="Missing authentication headers")
-    return {"user_id": x_user_id, "id_token": x_id_token}
+    """Validate Firebase credentials and use the token's actual account ID."""
+    if not x_id_token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    try:
+        verified_user_id = verify_id_token(x_id_token)
+    except FirebaseAuthUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not verified_user_id or (x_user_id and x_user_id != verified_user_id):
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+    return {"user_id": verified_user_id, "id_token": x_id_token}
 
 
 def _get_or_create_executor(user_id: str, id_token: str):

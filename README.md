@@ -137,45 +137,36 @@ This will:
 - Generate embeddings with HuggingFace
 - Store them in FAISS under faiss_index/
 
-## Run the RAG Chatbot
-1. Streamlit UI
-```
-streamlit run src/streamlit_app.py
-```
-- Access the chatbot in your browser (default): http://localhost:8501
-- Features:
-  - Clean & professional UI
-  - Chat history
-  - Expandable retrieved source chunks
-  - Clear chat button
+## Running the Modern React Web Application (Google Stitch UI)
 
-2. CLI Interface:
+### 1. Start the FastAPI Backend
+```bash
+uvicorn Source.api:app --reload --port 8000
 ```
-python src/cli_app.py --show-sources
-```
-Sample interaction:
-```
-💊 MediBot – Medical FAQ CLI Chatbot
-Type 'exit' or 'quit' to end the chat.
+- API Health: `http://localhost:8000/api/health`
+- Swagger Docs: `http://localhost:8000/docs`
 
-You: What are the early symptoms of diabetes?
-MediBot: Early symptoms of diabetes can include thirst, frequent urination, hunger, tiredness...
-Retrieved Source Chunks:
-- Original Question: what are the symptoms of diabetes ? | Source ID: 2993_0
+### 2. Start the React Frontend
+```bash
+cd frontend
+npm install
+npm run dev
 ```
+- Open in browser: `http://localhost:5173`
+
+The React app uses Firebase Authentication email/password accounts. Its Firebase web configuration is read from the repository-root `.env` (`FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, and `FIREBASE_PROJECT_ID`) when Vite builds the frontend; set those same variables in the frontend build environment after deployment. These are Firebase web-app configuration values, not service-account credentials. The app persists sign-in locally until the user logs out. The backend also needs `FIREBASE_API_KEY` at runtime to validate each Firebase ID token before accessing user data. If the frontend and backend are hosted separately, set `VITE_API_BASE_URL` to the backend API origin, including `/api` (for example, `https://api.example.com/api`). Keep `.env` out of source control, enable Email/Password sign-in in the Firebase console, and add the deployed frontend domain to Firebase's authorized domains.
+
+### Features & Screens:
+- 💬 **New Chat**: Multimodal medical consultations, image/lab report attachments, voice recording & transcription, clinical guideline recommendations, and nearby doctor referrals.
+- 📈 **Symptom Tracker**: Health pattern monitoring, AI clinical insights, metric stats (resting HR & sleep quality), and timeline logs.
+- 📍 **Doctor Search**: Find verified specialists with distance, specialty, insurance filters, and interactive clinic map.
+- 📖 **Patient Guides**: Personalized structured recovery guides, nutritional protocols, mobility routines, and on-demand AI guide generation.
+- 👤 **Profile & Onboarding**: Multi-step personalized profile setup (name, DOB, gender, location).
+
+---
+
 ## Local Testing Workflow
-1. Prepare dataset → notebooks/data_preparation.ipynb
-2. Build FAISS index → python src/embeddings.py
-3. Run chatbot:
-   - Streamlit UI → streamlit run src/streamlit_app.py
-   - CLI → python src/cli_app.py
-4. Ask questions and verify:
-   - Answers come from context only
-   - Sources are traceable
-   - Non-medical or unsafe queries handled responsibly
-
-## Notes
-- Caching: Frequently asked queries are cached for faster responses.
-- Safety: The prompt strictly prevents giving direct medical advice.
-- Extensibility: Can be extended to use other embedding models or vector DBs (like ChromaDB).
-- Data: Ensure processed_faqs.csv is well-cleaned before running embeddings.
+1. Build FAISS index → `python Source/embeddings.py`
+2. Start Backend → `uvicorn Source.api:app --reload --port 8000`
+3. Start Frontend → `cd frontend && npm run dev`
+4. CLI Alternative → `python Source/cli_app.py`

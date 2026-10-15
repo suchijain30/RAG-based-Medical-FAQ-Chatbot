@@ -19,7 +19,35 @@ FIRESTORE_BASE      = (
 )
 
 
+class FirebaseAuthUnavailable(Exception):
+    """Raised when Firebase cannot validate an authentication token."""
+
+
 # ── Auth ───────────────────────────────────────────────────────────────────
+
+def verify_id_token(id_token: str) -> str | None:
+    """Return the Firebase user ID for a valid ID token, or None if invalid."""
+    if not FIREBASE_API_KEY:
+        raise FirebaseAuthUnavailable("Firebase API key is not configured.")
+
+    try:
+        response = requests.post(
+            f"{FIREBASE_AUTH_BASE}:lookup?key={FIREBASE_API_KEY}",
+            json={"idToken": id_token},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        raise FirebaseAuthUnavailable("Unable to reach Firebase Authentication.") from exc
+
+    if response.status_code != 200:
+        return None
+
+    try:
+        users = response.json().get("users", [])
+    except requests.exceptions.JSONDecodeError as exc:
+        raise FirebaseAuthUnavailable("Firebase returned an invalid authentication response.") from exc
+    return users[0].get("localId") if users else None
+
 
 def signup(email: str, password: str) -> dict:
     """Create new account. Returns {ok, id_token, user_id, error}"""
