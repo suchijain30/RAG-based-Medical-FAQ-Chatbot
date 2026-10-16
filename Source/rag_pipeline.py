@@ -31,6 +31,7 @@ BASE_DIR         = Path(__file__).resolve().parent.parent
 FAISS_INDEX_PATH = os.getenv("FAISS_INDEX", str(BASE_DIR / "VectorStore" / "medical_faq_index"))
 USER_MEMORY_DIR  = BASE_DIR / "user_memory"
 HF_MODEL_NAME    = "sentence-transformers/all-MiniLM-L6-v2"
+GROQ_MODEL       = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 TOP_K            = 6
 
 # Ensure user_memory directory exists
@@ -371,7 +372,7 @@ def load_vector_store(faiss_index_path: str = FAISS_INDEX_PATH) -> FAISS:
 @lru_cache(maxsize=1)
 def _get_llm():
     return ChatGroq(
-        model="qwen/qwen3.6-27b",
+        model=GROQ_MODEL,
         temperature=0,
         max_tokens=1024,
         groq_api_key=GROQ_API_KEY

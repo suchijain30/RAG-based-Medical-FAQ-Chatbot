@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, MapPin, Phone, Search, Star } from 'lucide-react'
+import { ExternalLink, MapPin, Phone, Search } from 'lucide-react'
 import { searchDoctors } from '../services/api'
 
 const specialties = [
@@ -65,9 +65,6 @@ export default function DoctorSearchView({ city, user }) {
               <div className="doctor-info-text">
                 <div className="doctor-name-row">
                   <h2 className="doctor-name">{doctor.name}</h2>
-                  {doctor.rating != null && (
-                    <div className="doctor-rating"><Star size={13} fill="currentColor" /><span>{doctor.rating}{doctor.reviewCount ? ` (${doctor.reviewCount})` : ''}</span></div>
-                  )}
                 </div>
                 <div className="doctor-specialty-line">{doctor.specialty}</div>
                 {doctor.address && <p className="doctor-address">{doctor.address}</p>}
@@ -75,7 +72,7 @@ export default function DoctorSearchView({ city, user }) {
               </div>
             </div>
             <div className="doctor-card-bottom">
-              <span className="timeline-subtext">Information provided by Google Places</span>
+              <span className="timeline-subtext">Listing information provided by TomTom</span>
               <div className="doctor-result-links">
                 {doctor.website && <a className="filter-chip" href={doctor.website} target="_blank" rel="noreferrer">Website <ExternalLink size={13} /></a>}
                 {doctor.mapsUrl && <a className="book-btn" href={doctor.mapsUrl} target="_blank" rel="noreferrer">View directions <ExternalLink size={13} /></a>}
@@ -84,7 +81,7 @@ export default function DoctorSearchView({ city, user }) {
           </article>
         ))}
       </section>
-      <p className="provider-attribution">Listings, ratings, and links are returned by Google Places. Verify services, availability, and credentials with the provider.</p>
+      <p className="provider-attribution">Listing data © TomTom. Map links open Google Maps. Verify services, availability, and credentials directly with the provider.</p>
     </main>
   )
 }

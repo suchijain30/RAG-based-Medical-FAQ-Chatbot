@@ -12,8 +12,7 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Use the same model already in use — qwen3.6-27b supports vision on Groq
-VISION_MODEL = "qwen/qwen3.6-27b"
+VISION_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 
 def analyze_medical_image(

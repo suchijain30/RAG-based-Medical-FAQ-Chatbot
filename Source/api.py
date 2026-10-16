@@ -11,6 +11,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Depends
@@ -45,7 +46,7 @@ _executor_cache: OrderedDict = OrderedDict()
 _MAX_CACHED_EXECUTORS = 128
 _doctor_search_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _create_executor = None  # Set in lifespan
-GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
+TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "")
 
 
 @asynccontextmanager
@@ -452,10 +453,10 @@ async def api_symptom_insights(auth: dict = Depends(_get_auth)):
 
 @app.post("/api/doctors/search", tags=["Doctors"])
 async def api_search_doctors(req: DoctorSearchRequest, auth: dict = Depends(_get_auth)):
-    if not GOOGLE_PLACES_API_KEY:
+    if not TOMTOM_API_KEY:
         raise HTTPException(
             status_code=503,
-            detail="Doctor search is not configured. Set GOOGLE_PLACES_API_KEY on the backend.",
+            detail="Doctor search is not configured. Set TOMTOM_API_KEY on the backend.",
         )
     if not req.city.strip():
         raise HTTPException(status_code=400, detail="A city is required to search doctors.")
@@ -467,37 +468,44 @@ async def api_search_doctors(req: DoctorSearchRequest, auth: dict = Depends(_get
 
     query = f"{req.specialty.strip() + ' ' if req.specialty.strip() else ''}doctors in {req.city.strip()}"
     try:
-        response = requests.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers={
-                "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-                "X-Goog-FieldMask": (
-                    "places.id,places.displayName,places.formattedAddress,places.primaryType,"
-                    "places.rating,places.userRatingCount,places.googleMapsUri,places.websiteUri,"
-                    "places.nationalPhoneNumber"
-                ),
-            },
-            json={"textQuery": query, "pageSize": 20},
+        response = requests.get(
+            f"https://api.tomtom.com/search/2/search/{quote(query, safe='')}.json",
+            params={"key": TOMTOM_API_KEY, "limit": 20, "idxSet": "POI"},
             timeout=15,
         )
         response.raise_for_status()
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail="Doctor directory search failed.") from exc
 
-    doctors = [
-        {
-            "id": place.get("id"),
-            "name": place.get("displayName", {}).get("text", ""),
-            "address": place.get("formattedAddress", ""),
-            "specialty": place.get("primaryType", "doctor").replace("_", " ").title(),
-            "rating": place.get("rating"),
-            "reviewCount": place.get("userRatingCount"),
-            "mapsUrl": place.get("googleMapsUri", ""),
-            "website": place.get("websiteUri", ""),
-            "phone": place.get("nationalPhoneNumber", ""),
-        }
-        for place in response.json().get("places", [])
-    ]
+    doctors = []
+    for result in response.json().get("results", []):
+        poi = result.get("poi") or {}
+        name = poi.get("name", "")
+        if not name:
+            continue
+
+        address = result.get("address") or {}
+        position = result.get("position") or {}
+        categories = poi.get("categories") or []
+        specialty = categories[0] if categories else "Healthcare provider"
+        latitude, longitude = position.get("lat"), position.get("lon")
+        map_query = (
+            f"{latitude},{longitude}"
+            if latitude is not None and longitude is not None
+            else f"{name} {address.get('freeformAddress', '')}"
+        )
+        doctors.append({
+            "id": result.get("id") or f"{name}:{map_query}",
+            "name": name,
+            "address": address.get("freeformAddress", ""),
+            "specialty": specialty.replace("_", " ").title(),
+            "mapsUrl": (
+                "https://www.google.com/maps/search/?api=1&query="
+                f"{quote(map_query, safe='')}"
+            ),
+            "website": poi.get("url", ""),
+            "phone": poi.get("phone", ""),
+        })
     _doctor_search_cache[cache_key] = (time.monotonic(), doctors)
     if len(_doctor_search_cache) > 256:
         oldest = min(_doctor_search_cache, key=lambda key: _doctor_search_cache[key][0])

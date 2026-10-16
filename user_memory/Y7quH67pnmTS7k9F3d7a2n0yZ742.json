@@ -1,0 +1,22 @@
+{
+  "user_id": "Y7quH67pnmTS7k9F3d7a2n0yZ742",
+  "profile": {
+    "age": null,
+    "gender": null,
+    "conditions": [
+      "Pain",
+      "Vomiting"
+    ]
+  },
+  "lab_report": "",
+  "history": [
+    {
+      "role": "user",
+      "content": "i have a stomach pain and feel like vomiting"
+    },
+    {
+      "role": "assistant",
+      "content": "Stomach pain with nausea/vomiting can be caused by many things like food poisoning, infections, gastritis, or other conditions. For now, avoid solid foods until vomiting stops for at least 6 hours, then slowly return to a normal diet, and drink small amounts of clear fluids to stay hydrated. Seek immediate medical help if you have sudden sharp pain, vomiting blood, black tarry stools, a stiff/hard abdomen, or pain radiating to your chest, neck, or shoulder. Please consult a healthcare professional."
+    }
+  ]
+}
