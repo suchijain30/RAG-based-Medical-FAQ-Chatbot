@@ -17,7 +17,16 @@ async function getHeaders(user, json = true) {
 }
 
 async function readResponse(response) {
-  const data = await response.json()
+  const body = await response.text()
+  let data
+  try {
+    data = body ? JSON.parse(body) : {}
+  } catch {
+    const detail = body && !body.trimStart().startsWith('<')
+      ? body.slice(0, 300)
+      : response.statusText
+    throw new Error(detail || `Server returned an invalid response (${response.status}).`)
+  }
   if (!response.ok) {
     throw new Error(data.detail || `Request failed (${response.status}).`)
   }
@@ -71,6 +80,48 @@ export async function clearHistory(user) {
   const response = await fetch(`${API_BASE}/history`, {
     method: 'DELETE',
     headers: await getHeaders(user),
+  })
+  return readResponse(response)
+}
+
+export async function fetchProfile(user) {
+  const response = await fetch(`${API_BASE}/profile`, {
+    headers: await getHeaders(user),
+  })
+  return readResponse(response)
+}
+
+export async function saveProfile(profile, user) {
+  const response = await fetch(`${API_BASE}/profile`, {
+    method: 'PUT',
+    headers: await getHeaders(user),
+    body: JSON.stringify(profile),
+  })
+  return readResponse(response)
+}
+
+export async function saveSymptom(message, city, user) {
+  const response = await fetch(`${API_BASE}/symptoms`, {
+    method: 'POST',
+    headers: await getHeaders(user),
+    body: JSON.stringify({ message, city }),
+  })
+  return readResponse(response)
+}
+
+export async function fetchSymptomInsights(user) {
+  const response = await fetch(`${API_BASE}/symptoms/insights`, {
+    headers: await getHeaders(user),
+  })
+  return readResponse(response)
+}
+
+export async function searchDoctors(city, specialty, user, signal) {
+  const response = await fetch(`${API_BASE}/doctors/search`, {
+    method: 'POST',
+    headers: await getHeaders(user),
+    body: JSON.stringify({ city, specialty }),
+    signal,
   })
   return readResponse(response)
 }

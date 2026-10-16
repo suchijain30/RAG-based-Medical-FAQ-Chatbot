@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth'
-import { HeartPulse, Loader2, LockKeyhole, Mail, UserRound } from 'lucide-react'
+import { CalendarDays, HeartPulse, Loader2, LockKeyhole, Mail, MapPin, UserRound } from 'lucide-react'
 import { auth } from '../services/firebase'
+import { saveProfile } from '../services/profile'
 
 function getAuthError(error) {
   const messages = {
@@ -17,11 +18,14 @@ function getAuthError(error) {
   return messages[error.code] || 'Authentication failed. Please try again.'
 }
 
-export default function AuthScreen({ configError, initialError }) {
+export default function AuthScreen({ configError, initialError, onProfileSaved }) {
   const [isSignup, setIsSignup] = useState(false)
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [city, setCity] = useState('')
+  const [gender, setGender] = useState('')
+  const [dob, setDob] = useState('')
   const [error, setError] = useState(configError || initialError || '')
   const [busy, setBusy] = useState(false)
 
@@ -33,12 +37,20 @@ export default function AuthScreen({ configError, initialError }) {
     try {
       if (isSignup) {
         const credential = await createUserWithEmailAndPassword(auth, email, password)
-        if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() })
+        await updateProfile(credential.user, { displayName: name.trim() })
+        const profile = {
+          fullName: name.trim(),
+          city: city.trim(),
+          gender,
+          dob,
+        }
+        await saveProfile(profile, credential.user)
+        onProfileSaved?.(profile, credential.user)
       } else {
         await signInWithEmailAndPassword(auth, email, password)
       }
     } catch (authError) {
-      setError(getAuthError(authError))
+      setError(authError.code ? getAuthError(authError) : authError.message || 'Unable to create your account.')
     } finally {
       setBusy(false)
     }
@@ -55,10 +67,29 @@ export default function AuthScreen({ configError, initialError }) {
 
         <form className="auth-form" onSubmit={handleSubmit}>
           {isSignup && (
-            <label className="auth-field">
-              <span>Name</span>
-              <span className="auth-input-wrap"><UserRound size={18} /><input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></span>
-            </label>
+            <>
+              <label className="auth-field">
+                <span>Name</span>
+                <span className="auth-input-wrap"><UserRound size={18} /><input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" required /></span>
+              </label>
+              <label className="auth-field">
+                <span>Location</span>
+                <span className="auth-input-wrap"><MapPin size={18} /><input autoComplete="address-level2" value={city} onChange={(event) => setCity(event.target.value)} placeholder="City, country" required /></span>
+              </label>
+              <label className="auth-field">
+                <span>Gender</span>
+                <select className="auth-select" value={gender} onChange={(event) => setGender(event.target.value)} required>
+                  <option value="">Choose gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Transgender">Transgender</option>
+                </select>
+              </label>
+              <label className="auth-field">
+                <span>Date of birth</span>
+                <span className="auth-input-wrap"><CalendarDays size={18} /><input type="date" autoComplete="bday" value={dob} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setDob(event.target.value)} required /></span>
+              </label>
+            </>
           )}
           <label className="auth-field">
             <span>Email</span>

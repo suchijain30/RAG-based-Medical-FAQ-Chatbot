@@ -6,13 +6,16 @@ Run: uvicorn Source.api:app --reload --port 8000
 import os
 import sys
 import time
+import requests
+from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Optional
+from datetime import date
+from typing import Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 load_dotenv()
 
@@ -21,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rag_pipeline import (
     load_vector_store, initialize_rag_chain, ask_question_cached,
-    transcribe_audio, detect_language, save_lab_report,
+    transcribe_audio, detect_language, save_lab_report, _get_llm,
 )
 from vision import analyze_medical_image, get_mime_type
 from auth import (
@@ -29,15 +32,20 @@ from auth import (
     login as firebase_login,
     verify_id_token,
     FirebaseAuthUnavailable,
-    save_message, load_all_messages, delete_history,
+    FirestoreRequestError,
+    load_profile, save_profile,
+    save_message, load_recent_messages, delete_history,
 )
 
 
 # ── Global State ──────────────────────────────────────────────────────────
 
 # Executor cache: user_id → AgentExecutor (avoids re-creating on every request)
-_executor_cache: dict = {}
+_executor_cache: OrderedDict = OrderedDict()
+_MAX_CACHED_EXECUTORS = 128
+_doctor_search_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _create_executor = None  # Set in lifespan
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
 
 @asynccontextmanager
@@ -86,6 +94,18 @@ class AuthResponse(BaseModel):
     error: str = ""
 
 
+class ProfileRequest(BaseModel):
+    fullName: str = Field(min_length=1, max_length=100)
+    city: str = Field(min_length=1, max_length=200)
+    gender: Literal["Male", "Female", "Transgender"]
+    dob: date
+
+
+class DoctorSearchRequest(BaseModel):
+    city: str
+    specialty: str = ""
+
+
 class ChatRequest(BaseModel):
     message: str
     city: str = ""
@@ -127,6 +147,28 @@ class HealthResponse(BaseModel):
     version: str
     pipeline_loaded: bool
     active_sessions: int
+
+
+def generate_health_insights(messages: list[dict]) -> str:
+    """Generate an insight from the authenticated user's recent messages only."""
+    history = [
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in messages[-30:]
+        if message.get("role") in ("user", "assistant", "symptom")
+    ]
+    if not any(message.startswith(("user:", "symptom:")) for message in history):
+        return "There is not enough conversation history to identify a personal health pattern yet."
+
+    prompt = (
+        "Summarize this user's recent health-related conversation history in 2-4 concise sentences. "
+        "Identify recurring symptoms or changes only when the messages support them. "
+        "Do not diagnose, infer unreported measurements, or invent facts. If the history has no "
+        "clear recurring pattern, say that and suggest what the user could track. End by reminding "
+        "them to consult a healthcare professional for personal advice.\n\n"
+        + "\n".join(history)[-6000:]
+    )
+    result = _get_llm().invoke(prompt)
+    return result.content.strip()
 
 
 # ── Specialty Detection ──────────────────────────────────────────────────
@@ -195,14 +237,18 @@ def _get_auth(
 
 def _get_or_create_executor(user_id: str, id_token: str):
     """Get cached executor or create new one with user's history."""
-    if user_id in _executor_cache:
-        return _executor_cache[user_id]
+    executor = _executor_cache.get(user_id)
+    if executor is not None:
+        _executor_cache.move_to_end(user_id)
+        return executor
 
-    # Load history from Firestore and create executor
-    past = load_all_messages(user_id, id_token)
+    # Use only recent context for the model; the complete history stays in Firestore.
+    past = load_recent_messages(user_id, id_token)
     executor = _create_executor(past_messages=past)
     executor._user_id = user_id
     _executor_cache[user_id] = executor
+    if len(_executor_cache) > _MAX_CACHED_EXECUTORS:
+        _executor_cache.popitem(last=False)
     return executor
 
 
@@ -234,6 +280,27 @@ async def api_signup(req: AuthRequest):
 async def api_login(req: AuthRequest):
     result = firebase_login(req.email, req.password)
     return AuthResponse(**result)
+
+
+@app.get("/api/profile", tags=["Profile"])
+async def api_get_profile(auth: dict = Depends(_get_auth)):
+    try:
+        return load_profile(auth["user_id"], auth["id_token"])
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Unable to reach Firestore while loading your profile.") from exc
+    except FirestoreRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.put("/api/profile", tags=["Profile"])
+async def api_save_profile(req: ProfileRequest, auth: dict = Depends(_get_auth)):
+    profile = req.model_dump()
+    try:
+        return save_profile(auth["user_id"], auth["id_token"], profile)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Unable to reach Firestore while saving your profile.") from exc
+    except FirestoreRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ── Chat ─────────────────────────────────────────────────────────────────
@@ -346,7 +413,7 @@ async def api_image_analysis(
 
 @app.get("/api/history", response_model=HistoryResponse, tags=["History"])
 async def api_get_history(auth: dict = Depends(_get_auth)):
-    messages = load_all_messages(auth["user_id"], auth["id_token"])
+    messages = load_recent_messages(auth["user_id"], auth["id_token"])
     return HistoryResponse(
         messages=[HistoryMessage(**m) for m in messages],
         total=len(messages),
@@ -362,6 +429,80 @@ async def api_delete_history(auth: dict = Depends(_get_auth)):
     _executor_cache.pop(user_id, None)
 
     return {"ok": True, "message": "History cleared successfully"}
+
+
+@app.post("/api/symptoms", tags=["Symptoms"])
+async def api_save_symptom(req: ChatRequest, auth: dict = Depends(_get_auth)):
+    save_message(
+        auth["user_id"], auth["id_token"], "symptom", req.message,
+        city=req.city,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/symptoms/insights", tags=["Symptoms"])
+async def api_symptom_insights(auth: dict = Depends(_get_auth)):
+    messages = load_recent_messages(auth["user_id"], auth["id_token"])
+    try:
+        insight = generate_health_insights(messages)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Health insights are temporarily unavailable.") from exc
+    return {"insight": insight}
+
+
+@app.post("/api/doctors/search", tags=["Doctors"])
+async def api_search_doctors(req: DoctorSearchRequest, auth: dict = Depends(_get_auth)):
+    if not GOOGLE_PLACES_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Doctor search is not configured. Set GOOGLE_PLACES_API_KEY on the backend.",
+        )
+    if not req.city.strip():
+        raise HTTPException(status_code=400, detail="A city is required to search doctors.")
+
+    cache_key = (req.city.strip().casefold(), req.specialty.strip().casefold())
+    cached = _doctor_search_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < 600:
+        return {"doctors": cached[1]}
+
+    query = f"{req.specialty.strip() + ' ' if req.specialty.strip() else ''}doctors in {req.city.strip()}"
+    try:
+        response = requests.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            headers={
+                "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+                "X-Goog-FieldMask": (
+                    "places.id,places.displayName,places.formattedAddress,places.primaryType,"
+                    "places.rating,places.userRatingCount,places.googleMapsUri,places.websiteUri,"
+                    "places.nationalPhoneNumber"
+                ),
+            },
+            json={"textQuery": query, "pageSize": 20},
+            timeout=15,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Doctor directory search failed.") from exc
+
+    doctors = [
+        {
+            "id": place.get("id"),
+            "name": place.get("displayName", {}).get("text", ""),
+            "address": place.get("formattedAddress", ""),
+            "specialty": place.get("primaryType", "doctor").replace("_", " ").title(),
+            "rating": place.get("rating"),
+            "reviewCount": place.get("userRatingCount"),
+            "mapsUrl": place.get("googleMapsUri", ""),
+            "website": place.get("websiteUri", ""),
+            "phone": place.get("nationalPhoneNumber", ""),
+        }
+        for place in response.json().get("places", [])
+    ]
+    _doctor_search_cache[cache_key] = (time.monotonic(), doctors)
+    if len(_doctor_search_cache) > 256:
+        oldest = min(_doctor_search_cache, key=lambda key: _doctor_search_cache[key][0])
+        _doctor_search_cache.pop(oldest, None)
+    return {"doctors": doctors}
 
 
 # ── Session Management ───────────────────────────────────────────────────

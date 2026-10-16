@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, setPersistence, browserLocalPersistence, signOut } from 'firebase/auth';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
@@ -9,19 +9,7 @@ import PatientGuidesView from './components/PatientGuidesView';
 import OnboardingModal from './components/OnboardingModal';
 import AuthScreen from './components/AuthScreen';
 import { auth, firebaseConfigError } from './services/firebase';
-
-function getUserProfile(uid) {
-  try {
-    return JSON.parse(localStorage.getItem(`medibot_profile_${uid}`) || '{}');
-  } catch (error) {
-    console.error('Unable to load the saved profile:', error);
-    return {};
-  }
-}
-
-function saveUserProfile(uid, profile) {
-  localStorage.setItem(`medibot_profile_${uid}`, JSON.stringify(profile));
-}
+import { fetchProfile, saveProfile } from './services/profile';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState('chat'); // 'chat' | 'symptoms' | 'doctors' | 'guides'
@@ -32,6 +20,13 @@ export default function App() {
   );
   const [city, setCity] = useState('');
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem('medibot_theme') || 'light');
+  const signupProfiles = useRef({});
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('medibot_theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!auth) {
@@ -43,7 +38,7 @@ export default function App() {
     setPersistence(auth, browserLocalPersistence)
       .then(() => {
         if (!active) return;
-        unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+        unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
           if (!active) return;
           if (!firebaseUser) {
             setUser(null);
@@ -53,17 +48,33 @@ export default function App() {
             return;
           }
 
-          const profile = getUserProfile(firebaseUser.uid);
-          const nextUser = {
-            ...profile,
-            uid: firebaseUser.uid,
-            email: firebaseUser.email,
-            fullName: profile.fullName || firebaseUser.displayName || firebaseUser.email,
-          };
-          setUser(nextUser);
-          setCity(nextUser.city || 'New York, NY');
-          setAuthError('');
-          setIsInitializing(false);
+          try {
+            const profile = {
+              ...await fetchProfile(firebaseUser),
+              ...signupProfiles.current[firebaseUser.uid],
+            };
+            if (!active) return;
+            const nextUser = { ...profile, uid: firebaseUser.uid, email: firebaseUser.email };
+            setUser(nextUser);
+            setCity(nextUser.city || '');
+            setAuthError('');
+            setShowProfileModal(!profile.fullName || !profile.city || !profile.gender || !profile.dob);
+            setIsInitializing(false);
+          } catch (error) {
+            if (!active) return;
+            setUser({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              fullName: firebaseUser.displayName || '',
+              city: '',
+              gender: '',
+              dob: '',
+            });
+            setCity('');
+            setShowProfileModal(true);
+            setAuthError(`Unable to load your profile: ${error.message}`);
+            setIsInitializing(false);
+          }
         }, (error) => {
           setAuthError(`Unable to restore your sign-in: ${error.message}`);
           setIsInitializing(false);
@@ -80,11 +91,16 @@ export default function App() {
     };
   }, []);
 
-  const handleCityChange = (newCity) => {
-    setCity(newCity);
+  const handleCityChange = async (newCity) => {
     const updated = { ...user, city: newCity };
-    setUser(updated);
-    saveUserProfile(user.uid, updated);
+    try {
+      await saveProfile(updated, user);
+      setUser(updated);
+      setCity(newCity);
+      setAuthError('');
+    } catch (error) {
+      setAuthError(`Unable to save your location: ${error.message}`);
+    }
   };
 
   const handleDiscussWithBot = () => {
@@ -114,6 +130,14 @@ export default function App() {
       <AuthScreen
         configError={!auth ? `Firebase configuration is missing: ${firebaseConfigError.join(', ')}.` : ''}
         initialError={authError}
+        onProfileSaved={(profile, firebaseUser) => {
+          signupProfiles.current[firebaseUser.uid] = profile;
+          setUser({ ...profile, uid: firebaseUser.uid, email: firebaseUser.email });
+          setCity(profile.city);
+          setShowProfileModal(false);
+          setAuthError('');
+          setIsInitializing(false);
+        }}
       />
     );
   }
@@ -137,6 +161,8 @@ export default function App() {
           onCityChange={handleCityChange}
           onOpenProfile={() => setShowProfileModal(true)}
           user={user}
+          theme={theme}
+          onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
         />
 
         {/* View Switcher */}
@@ -149,11 +175,11 @@ export default function App() {
         )}
 
         {currentTab === 'doctors' && (
-          <DoctorSearchView city={city} />
+          <DoctorSearchView city={city} user={user} />
         )}
 
         {currentTab === 'symptoms' && (
-          <SymptomTrackerView onDiscussWithBot={handleDiscussWithBot} />
+          <SymptomTrackerView user={user} city={city} onDiscussWithBot={handleDiscussWithBot} />
         )}
 
         {currentTab === 'guides' && (
@@ -165,11 +191,17 @@ export default function App() {
       {showProfileModal && (
         <OnboardingModal 
           user={user}
-          onComplete={(updated) => {
-            setUser(updated);
-            setCity(updated.city);
-            saveUserProfile(user.uid, updated);
-            setShowProfileModal(false);
+          onComplete={async (updated) => {
+            try {
+              const saved = await saveProfile(updated, user);
+              setUser({ ...user, ...saved });
+              setCity(saved.city);
+              setShowProfileModal(false);
+              setAuthError('');
+            } catch (error) {
+              setAuthError(`Unable to save your profile: ${error.message}`);
+              throw error;
+            }
           }}
           onClose={() => setShowProfileModal(false)}
         />

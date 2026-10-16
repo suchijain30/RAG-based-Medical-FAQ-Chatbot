@@ -154,14 +154,16 @@ npm run dev
 ```
 - Open in browser: `http://localhost:5173`
 
-The React app uses Firebase Authentication email/password accounts. Its Firebase web configuration is read from the repository-root `.env` (`FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, and `FIREBASE_PROJECT_ID`) when Vite builds the frontend; set those same variables in the frontend build environment after deployment. These are Firebase web-app configuration values, not service-account credentials. The app persists sign-in locally until the user logs out. The backend also needs `FIREBASE_API_KEY` at runtime to validate each Firebase ID token before accessing user data. If the frontend and backend are hosted separately, set `VITE_API_BASE_URL` to the backend API origin, including `/api` (for example, `https://api.example.com/api`). Keep `.env` out of source control, enable Email/Password sign-in in the Firebase console, and add the deployed frontend domain to Firebase's authorized domains.
+The React app uses Firebase Authentication email/password accounts. Its Firebase web configuration is read from the repository-root `.env` (`FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, and `FIREBASE_PROJECT_ID`) when Vite builds the frontend; set those same variables in the frontend build environment after deployment. These are Firebase web-app configuration values, not service-account credentials. The backend also needs `FIREBASE_API_KEY` at runtime to validate each Firebase ID token before accessing user data. If the frontend and backend are hosted separately, set `VITE_API_BASE_URL` to the backend API origin, including `/api` (for example, `https://api.example.com/api`). Keep `.env` out of source control, enable Email/Password sign-in in the Firebase console, and add the deployed frontend domain to Firebase's authorized domains.
+
+Profile, chat, and symptom records are stored beneath each user's Firebase UID in Firestore. Publish the owner-only rules in [`firestore.rules`](./firestore.rules) in Firebase Console → Firestore Database → Rules before enabling the app; the rules permit users to read/write only their own records. For live doctor search, enable Google Places API (New) and billing in Google Cloud, then set `GOOGLE_PLACES_API_KEY` as a **backend-only deployment secret**. Do not expose this key through a `VITE_` variable or commit it. The directory returns real Places listings, ratings, websites, and map links; it does not provide appointment booking or verify clinical credentials.
 
 ### Features & Screens:
 - 💬 **New Chat**: Multimodal medical consultations, image/lab report attachments, voice recording & transcription, clinical guideline recommendations, and nearby doctor referrals.
-- 📈 **Symptom Tracker**: Health pattern monitoring, AI clinical insights, metric stats (resting HR & sleep quality), and timeline logs.
-- 📍 **Doctor Search**: Find verified specialists with distance, specialty, insurance filters, and interactive clinic map.
+- 📈 **Symptom Tracker**: Per-user chat and symptom history, with AI insights generated from that user's saved conversations.
+- 📍 **Doctor Search**: Live Google Places directory search by profile city and optional specialty, with current provider details and map links.
 - 📖 **Patient Guides**: Personalized structured recovery guides, nutritional protocols, mobility routines, and on-demand AI guide generation.
-- 👤 **Profile & Onboarding**: Multi-step personalized profile setup (name, DOB, gender, location).
+- 👤 **Profile & Onboarding**: Signup collects name, date of birth, gender, and location; users can update them later. Light/dark theme preference is available in the header.
 
 ---
 

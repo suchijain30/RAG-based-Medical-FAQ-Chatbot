@@ -1320,7 +1320,7 @@ button, input, select, textarea {
 
 .progress-fill {
   height: 100%;
-  width: 25%;
+  width: 100%;
   background: var(--primary-cyan);
 }
 
@@ -1577,4 +1577,166 @@ button, input, select, textarea {
   .auth-card {
     padding: 1.5rem;
   }
+}
+
+.auth-select,
+.doctor-filter-select {
+  min-height: 42px;
+  padding: 0.5rem 0.75rem;
+  color: var(--text-main);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.doctor-filter-label,
+.doctor-result-links,
+.doctor-phone,
+.doctor-result-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.doctor-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 1rem;
+}
+
+.doctor-card-item {
+  padding: 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.doctor-result-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--primary-blue);
+  background: var(--primary-cyan-light);
+  border-radius: 50%;
+}
+
+.doctor-address,
+.doctor-phone,
+.provider-attribution {
+  margin-top: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.doctor-phone {
+  color: var(--primary-blue);
+  text-decoration: none;
+}
+
+.doctor-result-links {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.provider-attribution {
+  margin-top: 1rem;
+  font-size: 0.75rem;
+}
+
+.symptom-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.symptom-modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --text-main: #e2e8f0;
+  --text-muted: #a6b4c8;
+  --text-subtle: #94a3b8;
+  --bg-page: #0b1220;
+  --bg-card: #111c2e;
+  --bg-sidebar: #111c2e;
+  --border-color: #334155;
+  --border-light: #263449;
+  --primary-cyan-light: #133b43;
+}
+
+html[data-theme="dark"] body,
+html[data-theme="dark"] .app-container {
+  color: var(--text-main);
+  background-color: var(--bg-page);
+}
+
+html[data-theme="dark"] .sidebar,
+html[data-theme="dark"] .top-header,
+html[data-theme="dark"] .onboarding-wrap,
+html[data-theme="dark"] .modal-box,
+html[data-theme="dark"] .auth-card,
+html[data-theme="dark"] .bot-card-bubble,
+html[data-theme="dark"] .doctor-card-item,
+html[data-theme="dark"] .history-section-card,
+html[data-theme="dark"] .guide-card,
+html[data-theme="dark"] .filter-bar,
+html[data-theme="dark"] .map-container,
+html[data-theme="dark"] .map-phone-frame,
+html[data-theme="dark"] .recommendation-callout {
+  color: var(--text-main);
+  background-color: var(--bg-card);
+  border-color: var(--border-color);
+}
+
+html[data-theme="dark"] .brand-title,
+html[data-theme="dark"] .page-title,
+html[data-theme="dark"] .history-header h3,
+html[data-theme="dark"] .doctor-name,
+html[data-theme="dark"] .guide-title,
+html[data-theme="dark"] .timeline-title,
+html[data-theme="dark"] .metric-number,
+html[data-theme="dark"] .auth-card h1,
+html[data-theme="dark"] .bot-message-text {
+  color: var(--text-main);
+}
+
+html[data-theme="dark"] .nav-item,
+html[data-theme="dark"] .recent-item,
+html[data-theme="dark"] .doctor-specialty-line,
+html[data-theme="dark"] .timeline-quote,
+html[data-theme="dark"] .filter-chip,
+html[data-theme="dark"] .location-pill {
+  color: var(--text-main);
+}
+
+html[data-theme="dark"] .nav-item:hover,
+html[data-theme="dark"] .recent-item:hover,
+html[data-theme="dark"] .filter-chip,
+html[data-theme="dark"] .location-pill {
+  background-color: #1e293b;
+}
+
+html[data-theme="dark"] .user-bubble,
+html[data-theme="dark"] .timeline-quote,
+html[data-theme="dark"] .auth-input-wrap,
+html[data-theme="dark"] .auth-select,
+html[data-theme="dark"] .doctor-filter-select {
+  color: var(--text-main);
+  background-color: #1e293b;
+  border-color: var(--border-color);
+}
+
+html[data-theme="dark"] .auth-input-wrap input,
+html[data-theme="dark"] .form-input,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] select {
+  color: var(--text-main);
+  background-color: #1e293b;
 }

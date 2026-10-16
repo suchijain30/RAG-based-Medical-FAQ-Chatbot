@@ -5,6 +5,7 @@ auth.py - Firebase Authentication + Firestore history manager
 import os
 import requests
 from datetime import datetime
+from uuid import uuid4
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +23,24 @@ FIRESTORE_BASE      = (
 class FirebaseAuthUnavailable(Exception):
     """Raised when Firebase cannot validate an authentication token."""
 
+
+class FirestoreRequestError(Exception):
+    """Raised when Firestore rejects or cannot complete a data request."""
+
+
+def _check_firestore_response(response, action: str) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        try:
+            detail = response.json().get("error", {}).get("message", "")
+        except (ValueError, AttributeError):
+            detail = ""
+        if not detail:
+            detail = response.text[:300] or "No error details returned."
+        raise FirestoreRequestError(
+            f"Firestore {action} failed ({response.status_code}): {detail}"
+        ) from exc
 
 # ── Auth ───────────────────────────────────────────────────────────────────
 
@@ -102,12 +121,46 @@ def _headers(id_token: str) -> dict:
             "Content-Type": "application/json"}
 
 
+def _firestore_headers(id_token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {id_token}",
+        "Content-Type": "application/json",
+    }
+
+
+def load_profile(user_id: str, id_token: str) -> dict:
+    response = requests.get(
+        f"{FIRESTORE_BASE}/users/{user_id}",
+        headers=_firestore_headers(id_token),
+        timeout=10,
+    )
+    if response.status_code == 404:
+        return {}
+    _check_firestore_response(response, "profile load")
+    fields = response.json().get("fields", {})
+    return {key: value.get("stringValue", "") for key, value in fields.items()}
+
+
+def save_profile(user_id: str, id_token: str, profile: dict) -> dict:
+    response = requests.patch(
+        f"{FIRESTORE_BASE}/users/{user_id}",
+        headers=_firestore_headers(id_token),
+        json={"fields": {
+            key: {"stringValue": str(value)}
+            for key, value in profile.items()
+        }},
+        timeout=10,
+    )
+    _check_firestore_response(response, "profile save")
+    return profile
+
+
 def save_message(user_id: str, id_token: str,
                  role: str, content: str,
                  city: str = "", specialty: str = "") -> bool:
     """Save a single message (user or assistant) to Firestore."""
     now = datetime.utcnow().isoformat() + "Z"
-    doc_id = now.replace(":", "-").replace(".", "-")  # valid Firestore doc ID
+    doc_id = uuid4().hex
 
     doc = {
         "fields": {
@@ -122,57 +175,73 @@ def save_message(user_id: str, id_token: str,
     r = requests.post(
         f"{FIRESTORE_BASE}/users/{user_id}/messages",
         json=doc,
-        headers=_headers(id_token),
+        headers=_firestore_headers(id_token),
         params={"documentId": doc_id},
         timeout=10
     )
-    return r.status_code in (200, 201)
+    r.raise_for_status()
+    return True
+
+
+def load_recent_messages(user_id: str, id_token: str, limit: int = 100) -> list[dict]:
+    response = requests.get(
+        f"{FIRESTORE_BASE}/users/{user_id}/messages",
+        headers=_firestore_headers(id_token),
+        params={"pageSize": limit, "orderBy": "timestamp desc"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    messages = []
+    for doc in response.json().get("documents", []):
+        fields = doc.get("fields", {})
+        messages.append({
+            key: fields.get(key, {}).get("stringValue", "")
+            for key in ("role", "content", "city", "specialty", "timestamp")
+        })
+    messages.reverse()
+    return messages
 
 
 def load_all_messages(user_id: str, id_token: str) -> list[dict]:
     """Load ALL messages for a user, sorted oldest first."""
-    r = requests.get(
-        f"{FIRESTORE_BASE}/users/{user_id}/messages",
-        headers=_headers(id_token),
-        params={"pageSize": 1000,
-                "orderBy": "timestamp"},   # needs Firestore index (auto-created)
-        timeout=15
-    )
-    data = r.json()
-    docs = data.get("documents", [])
-
     messages = []
-    for doc in docs:
-        f = doc.get("fields", {})
-        messages.append({
-            "role":      f.get("role",      {}).get("stringValue", ""),
-            "content":   f.get("content",   {}).get("stringValue", ""),
-            "city":      f.get("city",      {}).get("stringValue", ""),
-            "specialty": f.get("specialty", {}).get("stringValue", ""),
-            "timestamp": f.get("timestamp", {}).get("stringValue", ""),
-        })
+    url = f"{FIRESTORE_BASE}/users/{user_id}/messages"
+    params = {"pageSize": 1000}
+    while url:
+        response = requests.get(url, headers=_firestore_headers(id_token), params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        for doc in data.get("documents", []):
+            fields = doc.get("fields", {})
+            messages.append({
+                key: fields.get(key, {}).get("stringValue", "")
+                for key in ("role", "content", "city", "specialty", "timestamp")
+            })
+        token = data.get("nextPageToken")
+        url = f"{FIRESTORE_BASE}/users/{user_id}/messages" if token else ""
+        params = {"pageSize": 1000, "pageToken": token} if token else {}
 
-    # Sort by timestamp (Firestore orderBy needs index; fallback sort here)
     messages.sort(key=lambda x: x["timestamp"])
     return messages
 
 
 def delete_history(user_id: str, id_token: str) -> bool:
     """Delete all messages for a user (used by 'Clear History' button)."""
-    # Firestore doesn't support bulk delete via REST easily —
-    # we fetch all doc names and delete one by one
-    r = requests.get(
-        f"{FIRESTORE_BASE}/users/{user_id}/messages",
-        headers=_headers(id_token),
-        params={"pageSize": 1000},
-        timeout=15
-    )
-    docs = r.json().get("documents", [])
-    for doc in docs:
-        doc_name = doc.get("name", "")
-        requests.delete(
-            f"https://firestore.googleapis.com/v1/{doc_name}",
-            headers=_headers(id_token),
-            timeout=10
-        )
+    url = f"{FIRESTORE_BASE}/users/{user_id}/messages"
+    params = {"pageSize": 1000}
+    while url:
+        response = requests.get(url, headers=_firestore_headers(id_token), params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        for doc in data.get("documents", []):
+            name = doc.get("name", "")
+            deleted = requests.delete(
+                f"https://firestore.googleapis.com/v1/{name}",
+                headers=_firestore_headers(id_token),
+                timeout=10,
+            )
+            deleted.raise_for_status()
+        token = data.get("nextPageToken")
+        url = f"{FIRESTORE_BASE}/users/{user_id}/messages" if token else ""
+        params = {"pageSize": 1000, "pageToken": token} if token else {}
     return True

@@ -1,76 +1,73 @@
-import React, { useState } from 'react';
-import { 
-  Plus, 
-  Lightbulb, 
-  MessageSquare, 
-  Heart, 
-  Moon, 
-  Calendar,
-  CheckCircle2
-} from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react'
+import { Activity, Lightbulb, MessageSquare, Plus } from 'lucide-react'
+import { fetchHistory, fetchSymptomInsights, saveSymptom } from '../services/api'
 
-export default function SymptomTrackerView({ onDiscussWithBot }) {
-  const [logs, setLogs] = useState([
-    {
-      id: 1,
-      title: 'Mild Headache & Fatigue',
-      date: 'TODAY, 9:41 AM',
-      type: 'Logged via text input.',
-      tags: ['Headache', 'Fatigue'],
-      intensity: '4/10',
-      dotColor: 'cyan',
-    },
-    {
-      id: 2,
-      title: 'Voice Log Transcription',
-      date: 'YESTERDAY, 8:15 PM',
-      quote: '"Feeling a bit feverish this evening, throat is slightly scratchy."',
-      tags: ['Fever', 'Sore Throat'],
-      dotColor: 'gray',
-    },
-    {
-      id: 3,
-      title: 'Normal Baseline',
-      date: 'OCT 12, 10:00 AM',
-      type: 'Automated check-in. No symptoms reported.',
-      tags: [],
-      dotColor: 'gray',
+function formatDate(value) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleString()
+}
+
+export default function SymptomTrackerView({ user, city, onDiscussWithBot }) {
+  const [history, setHistory] = useState([])
+  const [insight, setInsight] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showLogModal, setShowLogModal] = useState(false)
+  const [newSymptom, setNewSymptom] = useState('')
+  const [newIntensity, setNewIntensity] = useState('')
+  const [newNotes, setNewNotes] = useState('')
+
+  const loadHistory = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const [conversation, generated] = await Promise.all([
+        fetchHistory(user),
+        fetchSymptomInsights(user),
+      ])
+      setHistory(conversation.messages)
+      setInsight(generated.insight)
+    } catch (loadError) {
+      setError(loadError.message || 'Unable to load your health history.')
+    } finally {
+      setLoading(false)
     }
-  ]);
+  }, [user])
 
-  const [showLogModal, setShowLogModal] = useState(false);
-  const [newSymptom, setNewSymptom] = useState('');
-  const [newIntensity, setNewIntensity] = useState('5');
-  const [newNotes, setNewNotes] = useState('');
+  useEffect(() => {
+    loadHistory()
+  }, [loadHistory])
 
-  const handleAddLog = (e) => {
-    e.preventDefault();
-    if (!newSymptom.trim()) return;
+  const handleAddLog = async (event) => {
+    event.preventDefault()
+    if (!newSymptom.trim() || saving) return
+    setSaving(true)
+    setError('')
+    try {
+      const note = newNotes.trim() ? ` Notes: ${newNotes.trim()}` : ''
+      await saveSymptom(`${newSymptom.trim()} (self-reported intensity ${newIntensity}/10).${note}`, city, user)
+      setNewSymptom('')
+      setNewIntensity('')
+      setNewNotes('')
+      setShowLogModal(false)
+      await loadHistory()
+    } catch (saveError) {
+      setError(saveError.message || 'Unable to save your symptom log.')
+    } finally {
+      setSaving(false)
+    }
+  }
 
-    const newEntry = {
-      id: Date.now(),
-      title: newSymptom,
-      date: 'JUST NOW',
-      type: newNotes || 'Logged via web entry.',
-      tags: [newSymptom],
-      intensity: `${newIntensity}/10`,
-      dotColor: 'cyan',
-    };
-
-    setLogs([newEntry, ...logs]);
-    setNewSymptom('');
-    setNewNotes('');
-    setShowLogModal(false);
-  };
+  const userEntries = history.filter((item) => item.role === 'user' || item.role === 'symptom')
+  const lastActivity = history.length ? formatDate(history[history.length - 1].timestamp) : 'No conversations yet'
 
   return (
     <div className="content-body">
       <div className="symptom-top-row">
         <div>
           <h1 className="page-title">Symptom Tracker</h1>
-          <p className="page-subtitle">
-            Monitor your health patterns, review past logs, and receive AI-driven clinical insights based on your recent activity.
-          </p>
+          <p className="page-subtitle">Your private chat and symptom history, with insights generated from what you have shared.</p>
         </div>
         <button className="log-symptom-btn" onClick={() => setShowLogModal(true)}>
           <Plus size={18} />
@@ -78,149 +75,84 @@ export default function SymptomTrackerView({ onDiscussWithBot }) {
         </button>
       </div>
 
-      {/* Grid: AI Insight + Metrics */}
+      {error && <p className="chat-error" role="alert">{error}</p>}
+
       <div className="tracker-grid">
-        {/* AI Insight Card */}
-        <div className="insight-card">
-          <div className="insight-badge">
-            <Lightbulb size={16} />
-            <span>AI INSIGHT</span>
-          </div>
-          <h3 className="insight-title">Seasonal Pattern Detected</h3>
+        <section className="insight-card">
+          <div className="insight-badge"><Lightbulb size={16} /><span>AI INSIGHT FROM YOUR HISTORY</span></div>
           <p className="insight-desc">
-            Your recent logs of <strong>dry cough</strong> and <strong>fatigue</strong> align closely with seasonal allergies, similar to patterns noted last Spring. We recommend monitoring pollen counts in your area over the next two weeks.
+            {loading ? 'Reviewing your conversation history…' : insight || 'No insight is available yet.'}
           </p>
           <div className="insight-actions">
-            <button className="discuss-btn" onClick={() => onDiscussWithBot && onDiscussWithBot('Can you explain seasonal allergy patterns and what treatments help?')}>
-              <MessageSquare size={16} />
-              <span>Discuss with MediBot</span>
+            <button className="discuss-btn" onClick={() => onDiscussWithBot?.()}>
+              <MessageSquare size={16} /><span>Discuss with MediBot</span>
             </button>
-            <span className="secondary-link" onClick={() => alert('Viewing historical 12-month allergy pattern correlations.')}>
-              View Past Patterns
-            </span>
           </div>
-        </div>
+        </section>
 
-        {/* Right Metrics Column */}
         <div className="metrics-column">
           <div className="metric-card">
-            <div className="metric-icon-box cyan">
-              <Heart size={24} />
-            </div>
+            <div className="metric-icon-box cyan"><Activity size={24} /></div>
             <div>
-              <div className="metric-label">AVG RESTING HR</div>
-              <div className="metric-value-row">
-                <span className="metric-number">68</span>
-                <span className="metric-unit">bpm</span>
-              </div>
+              <div className="metric-label">YOUR REPORTED ENTRIES</div>
+              <div className="metric-value-row"><span className="metric-number">{userEntries.length}</span></div>
             </div>
           </div>
-
           <div className="metric-card">
-            <div className="metric-icon-box dark">
-              <Moon size={24} />
-            </div>
+            <div className="metric-icon-box dark"><MessageSquare size={24} /></div>
             <div>
-              <div className="metric-label">SLEEP QUALITY</div>
-              <div className="metric-value-row">
-                <span className="metric-number">7.2</span>
-                <span className="metric-unit">hrs/night</span>
-              </div>
+              <div className="metric-label">LAST ACTIVITY</div>
+              <div className="metric-value-row"><span className="metric-unit">{lastActivity}</span></div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Recent History Timeline */}
-      <div className="history-section-card">
-        <div className="history-header">
-          <h3>Recent History</h3>
-          <span className="secondary-link" onClick={() => alert('Displaying complete log repository.')}>
-            View All Logs
-          </span>
-        </div>
+      <section className="history-section-card">
+        <div className="history-header"><h3>Your History</h3></div>
+        {loading ? <p className="timeline-subtext">Loading your private history…</p> : history.length === 0 ? (
+          <p className="timeline-subtext">Your conversations and symptom logs will appear here.</p>
+        ) : (
+          <div className="timeline-list">
+            {[...history].reverse().map((item, index) => (
+              <article className="timeline-item" key={`${item.timestamp}-${index}`}>
+                <div className={`timeline-dot ${item.role === 'symptom' ? 'cyan' : ''}`} />
+                <div className="timeline-title-row">
+                  <div className="timeline-title">{item.role === 'assistant' ? 'MediBot response' : item.role === 'symptom' ? 'Symptom log' : 'You'}</div>
+                  <time className="timeline-date">{formatDate(item.timestamp)}</time>
+                </div>
+                <div className="timeline-quote">{item.content}</div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
-        <div className="timeline-list">
-          {logs.map((item) => (
-            <div key={item.id} className="timeline-item">
-              <div className={`timeline-dot ${item.dotColor === 'cyan' ? 'cyan' : ''}`} />
-              <div className="timeline-title-row">
-                <div className="timeline-title">{item.title}</div>
-                <div className="timeline-date">{item.date}</div>
-              </div>
-
-              {item.type && <div className="timeline-subtext">{item.type}</div>}
-              {item.quote && <div className="timeline-quote">{item.quote}</div>}
-
-              <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.4rem', flexWrap: 'wrap' }}>
-                {item.tags.map((tag, idx) => (
-                  <span key={idx} className="tag-pill">{tag}</span>
-                ))}
-                {item.intensity && (
-                  <span className="intensity-badge">Intensity: {item.intensity}</span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Log Symptom Modal */}
       {showLogModal && (
         <div className="modal-backdrop" onClick={() => setShowLogModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ fontSize: '1.3rem', fontWeight: '700', marginBottom: '1rem' }}>
-              Log New Symptom
-            </h2>
+          <div className="modal-box" onClick={(event) => event.stopPropagation()}>
+            <h2>Log a symptom</h2>
             <form onSubmit={handleAddLog}>
               <div className="form-group">
-                <label className="form-label">Symptom Description</label>
-                <input 
-                  type="text" 
-                  className="form-input" 
-                  style={{ paddingLeft: '1rem' }}
-                  placeholder="e.g. Throbbing migraine, Sore throat, Cough"
-                  value={newSymptom}
-                  onChange={(e) => setNewSymptom(e.target.value)}
-                  required
-                />
+                <label className="form-label" htmlFor="symptom-description">Symptom description</label>
+                <input id="symptom-description" className="form-input" value={newSymptom} onChange={(event) => setNewSymptom(event.target.value)} required />
               </div>
-
               <div className="form-group">
-                <label className="form-label">Intensity: {newIntensity} / 10</label>
-                <input 
-                  type="range" 
-                  min="1" 
-                  max="10" 
-                  value={newIntensity} 
-                  onChange={(e) => setNewIntensity(e.target.value)} 
-                  style={{ width: '100%' }}
-                />
+                <label className="form-label" htmlFor="symptom-intensity">Self-reported intensity (1–10)</label>
+                <input id="symptom-intensity" type="number" min="1" max="10" value={newIntensity} onChange={(event) => setNewIntensity(event.target.value)} required />
               </div>
-
               <div className="form-group">
-                <label className="form-label">Notes & Circumstances</label>
-                <textarea 
-                  className="form-input"
-                  style={{ paddingLeft: '1rem', minHeight: '80px' }}
-                  placeholder="e.g. Started after working on laptop for 6 hours"
-                  value={newNotes}
-                  onChange={(e) => setNewNotes(e.target.value)}
-                />
+                <label className="form-label" htmlFor="symptom-notes">Notes</label>
+                <textarea id="symptom-notes" className="form-input" value={newNotes} onChange={(event) => setNewNotes(event.target.value)} />
               </div>
-
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '1.5rem' }}>
-                <button type="button" className="filter-chip" onClick={() => setShowLogModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="book-btn">
-                  Save Symptom Log
-                </button>
+              <div className="symptom-modal-actions">
+                <button type="button" className="filter-chip" onClick={() => setShowLogModal(false)}>Cancel</button>
+                <button type="submit" className="book-btn" disabled={saving}>{saving ? 'Saving…' : 'Save symptom log'}</button>
               </div>
             </form>
           </div>
         </div>
       )}
     </div>
-  );
+  )
 }

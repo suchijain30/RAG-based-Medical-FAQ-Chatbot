@@ -10,26 +10,40 @@ import {
   ExternalLink,
   Loader2
 } from 'lucide-react';
-import { sendChatMessage, sendVoiceChat, sendImageAnalysis } from '../services/api';
+import { fetchHistory, sendChatMessage, sendVoiceChat, sendImageAnalysis } from '../services/api';
 
 export default function ChatView({ city, user, onFindSpecialist }) {
-  const [messages, setMessages] = useState([
-    {
-      id: 'init-1',
-      role: 'assistant',
-      content: "Hello. I'm MediBot, your clinical assistant. How can I help you manage your health today?",
-      chips: ['Check symptoms', 'Medication interactions', 'Find a specialist'],
-    },
-  ]);
+  const [messages, setMessages] = useState([]);
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [error, setError] = useState('');
   const [recording, setRecording] = useState(false);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const fileInputRef = useRef(null);
   const chatBottomRef = useRef(null);
+
+  useEffect(() => {
+    let active = true
+    setHistoryLoading(true)
+    fetchHistory(user)
+      .then(({ messages: history }) => {
+        if (active) setMessages(history.map((message, index) => ({
+          ...message,
+          id: `${message.timestamp}-${index}`,
+          role: message.role === 'symptom' ? 'user' : message.role,
+        })))
+      })
+      .catch((error) => {
+        if (active) setError(`Unable to load your conversation history: ${error.message}`)
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false)
+      })
+    return () => { active = false }
+  }, [user])
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -167,6 +181,9 @@ export default function ChatView({ city, user, onFindSpecialist }) {
     <div className="chat-container">
       {/* Thread */}
       <div className="chat-thread">
+        {!historyLoading && messages.length === 0 && (
+          <div className="bot-card-bubble">Hello. I’m MediBot. How can I help you today?</div>
+        )}
         {messages.map((msg) => (
           <div key={msg.id} className={`message-row ${msg.role}`}>
             {msg.role === 'assistant' && (
@@ -256,14 +273,14 @@ export default function ChatView({ city, user, onFindSpecialist }) {
           </div>
         ))}
 
-        {loading && (
+        {(loading || historyLoading) && (
           <div className="message-row assistant">
             <div className="avatar-circle bot">
               <Stethoscope size={18} />
             </div>
             <div className="bot-card-bubble" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#64748b' }}>
               <Loader2 className="animate-spin" size={18} />
-              <span>Analyzing symptoms & medical database...</span>
+              <span>{historyLoading ? 'Loading your private history…' : 'Analyzing symptoms & medical database…'}</span>
             </div>
           </div>
         )}

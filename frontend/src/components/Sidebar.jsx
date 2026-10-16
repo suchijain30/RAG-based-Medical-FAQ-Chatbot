@@ -4,7 +4,6 @@ import {
   Activity, 
   MapPin, 
   BookOpen, 
-  Sparkles, 
   User, 
   LogOut,
   Stethoscope
@@ -15,8 +14,6 @@ export default function Sidebar({
   setCurrentTab, 
   onOpenProfile, 
   onLogout,
-  recentChats = [],
-  onSelectRecentChat
 }) {
   const navItems = [
     { id: 'chat', label: 'New Chat', icon: MessageSquarePlus },
@@ -38,12 +35,6 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Upgrade to Pro Button */}
-      <button className="upgrade-btn" onClick={() => alert('MediBot Pro: Advanced multimodal diagnostics, priority doctor bookings, and full medical records sync.')}>
-        <Sparkles size={16} />
-        <span>Upgrade to Pro</span>
-      </button>
-
       {/* Navigation */}
       <nav className="nav-menu">
         {navItems.map((item) => {
@@ -61,20 +52,6 @@ export default function Sidebar({
           );
         })}
       </nav>
-
-      {/* Recent Conversations (Visible in Chat) */}
-      <div className="recent-section">
-        <div className="recent-heading">Recent Conversations</div>
-        <button className="recent-item" onClick={() => onSelectRecentChat && onSelectRecentChat('Persistent headache guidelines')}>
-          Persistent headache guidelines
-        </button>
-        <button className="recent-item" onClick={() => onSelectRecentChat && onSelectRecentChat('Vitamin D deficiency symptoms')}>
-          Vitamin D deficiency symptoms
-        </button>
-        <button className="recent-item" onClick={() => onSelectRecentChat && onSelectRecentChat('Post-op care instructions')}>
-          Post-op care instructions
-        </button>
-      </div>
 
       {/* Bottom Actions */}
       <div className="sidebar-bottom">
