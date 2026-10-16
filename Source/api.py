@@ -7,10 +7,11 @@ import os
 import sys
 import time
 import requests
+import logging
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Literal, Optional
+from typing import Literal
 from urllib.parse import quote
 
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rag_pipeline import (
     load_vector_store, initialize_rag_chain, ask_question_cached,
-    transcribe_audio, detect_language, save_lab_report, _get_llm,
+    transcribe_audio, detect_language, _get_llm,
 )
 from vision import analyze_medical_image, get_mime_type
 from auth import (
@@ -35,7 +36,7 @@ from auth import (
     FirebaseAuthUnavailable,
     FirestoreRequestError,
     load_profile, save_profile,
-    save_message, load_recent_messages, delete_history,
+    save_message, load_recent_messages, load_all_messages, delete_history,
 )
 
 
@@ -43,6 +44,7 @@ from auth import (
 
 # Executor cache: user_id → AgentExecutor (avoids re-creating on every request)
 _executor_cache: OrderedDict = OrderedDict()
+logger = logging.getLogger(__name__)
 _MAX_CACHED_EXECUTORS = 128
 _doctor_search_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _create_executor = None  # Set in lifespan
@@ -139,6 +141,9 @@ class HistoryMessage(BaseModel):
 class HistoryResponse(BaseModel):
     messages: list[HistoryMessage]
     total: int
+    conversation_count: int
+    symptom_count: int
+    ai_response_count: int
 
 
 class ImageAnalysisResponse(BaseModel):
@@ -429,10 +434,17 @@ async def api_image_analysis(
 
 @app.get("/api/history", response_model=HistoryResponse, tags=["History"])
 async def api_get_history(auth: dict = Depends(_get_auth)):
-    messages = load_recent_messages(auth["user_id"], auth["id_token"])
+    try:
+        messages = load_all_messages(auth["user_id"], auth["id_token"])
+    except (requests.RequestException, FirestoreRequestError) as exc:
+        logger.exception("Unable to load authenticated user's history from Firestore")
+        raise HTTPException(status_code=502, detail="Unable to load your saved history from Firestore.") from exc
     return HistoryResponse(
         messages=[HistoryMessage(**m) for m in messages],
         total=len(messages),
+        conversation_count=sum(message["role"] == "user" for message in messages),
+        symptom_count=sum(message["role"] == "symptom" for message in messages),
+        ai_response_count=sum(message["role"] == "assistant" for message in messages),
     )
 
 
@@ -458,11 +470,20 @@ async def api_save_symptom(req: ChatRequest, auth: dict = Depends(_get_auth)):
 
 @app.get("/api/symptoms/insights", tags=["Symptoms"])
 async def api_symptom_insights(auth: dict = Depends(_get_auth)):
-    messages = load_recent_messages(auth["user_id"], auth["id_token"])
+    try:
+        messages = load_recent_messages(auth["user_id"], auth["id_token"])
+    except (requests.RequestException, FirestoreRequestError) as exc:
+        logger.exception("Unable to load history for authenticated user's health insight")
+        raise HTTPException(status_code=502, detail="Unable to load your saved history for AI analysis.") from exc
+
     try:
         insight = generate_health_insights(messages)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="Health insights are temporarily unavailable.") from exc
+        logger.exception("AI health insight generation failed")
+        raise HTTPException(
+            status_code=503,
+            detail="AI analysis is temporarily unavailable. Your saved conversation history is still available.",
+        ) from exc
     return {"insight": insight}
 
 

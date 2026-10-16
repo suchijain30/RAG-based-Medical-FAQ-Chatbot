@@ -31,7 +31,7 @@ BASE_DIR         = Path(__file__).resolve().parent.parent
 FAISS_INDEX_PATH = os.getenv("FAISS_INDEX", str(BASE_DIR / "VectorStore" / "medical_faq_index"))
 USER_MEMORY_DIR  = BASE_DIR / "user_memory"
 HF_MODEL_NAME    = "sentence-transformers/all-MiniLM-L6-v2"
-GROQ_MODEL       = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+GROQ_MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 TOP_K            = 6
 
 # Ensure user_memory directory exists

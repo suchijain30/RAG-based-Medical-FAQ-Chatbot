@@ -12,8 +12,7 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-VISION_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-
+VISION_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 def analyze_medical_image(
     image_bytes: bytes,
