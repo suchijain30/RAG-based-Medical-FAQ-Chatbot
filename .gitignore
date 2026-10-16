@@ -9,6 +9,7 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+user_memory/
 
 # FAISS index (large binary files - commit separately or use Git LFS)
 

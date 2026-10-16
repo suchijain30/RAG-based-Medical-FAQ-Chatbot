@@ -4,7 +4,7 @@ auth.py - Firebase Authentication + Firestore history manager
 
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from dotenv import load_dotenv
 
@@ -18,6 +18,8 @@ FIRESTORE_BASE      = (
     f"https://firestore.googleapis.com/v1/projects/"
     f"{FIREBASE_PROJECT_ID}/databases/(default)/documents"
 )
+MESSAGE_RETENTION_DAYS = 30
+_RETENTION_MIGRATED_USERS: set[str] = set()
 
 
 class FirebaseAuthUnavailable(Exception):
@@ -155,11 +157,91 @@ def save_profile(user_id: str, id_token: str, profile: dict) -> dict:
     return profile
 
 
+def _message_expiration(timestamp: str) -> str:
+    try:
+        created_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+    except (AttributeError, ValueError):
+        created_at = datetime.now(timezone.utc)
+    return (created_at + timedelta(days=MESSAGE_RETENTION_DAYS)).isoformat().replace("+00:00", "Z")
+
+
+def _is_expired(expiration: str) -> bool:
+    try:
+        expires_at = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
+    except (AttributeError, ValueError):
+        return False
+
+
+def _ensure_message_expirations(user_id: str, id_token: str) -> None:
+    """Backfill TTL timestamps once for this user's existing Firestore history."""
+    if user_id in _RETENTION_MIGRATED_USERS:
+        return
+
+    marker_url = f"{FIRESTORE_BASE}/users/{user_id}/metadata/messageRetention"
+    marker = requests.get(
+        marker_url,
+        headers=_firestore_headers(id_token),
+        timeout=10,
+    )
+    if marker.status_code != 404:
+        _check_firestore_response(marker, "message retention check")
+        _RETENTION_MIGRATED_USERS.add(user_id)
+        return
+
+    messages_url = f"{FIRESTORE_BASE}/users/{user_id}/messages"
+    params = {"pageSize": 500}
+    while messages_url:
+        response = requests.get(
+            messages_url,
+            headers=_firestore_headers(id_token),
+            params=params,
+            timeout=15,
+        )
+        _check_firestore_response(response, "message retention migration")
+        data = response.json()
+        for document in data.get("documents", []):
+            fields = document.get("fields", {})
+            if "expiresAt" in fields:
+                continue
+            timestamp = fields.get("timestamp", {}).get("stringValue", "")
+            expiration = _message_expiration(timestamp)
+            update = requests.patch(
+                f"https://firestore.googleapis.com/v1/{document['name']}",
+                headers=_firestore_headers(id_token),
+                params={"updateMask.fieldPaths": "expiresAt"},
+                json={"fields": {"expiresAt": {"timestampValue": expiration}}},
+                timeout=10,
+            )
+            _check_firestore_response(update, "message retention migration")
+
+        token = data.get("nextPageToken")
+        messages_url = f"{FIRESTORE_BASE}/users/{user_id}/messages" if token else ""
+        params = {"pageSize": 500, "pageToken": token} if token else {}
+
+    marker_response = requests.patch(
+        marker_url,
+        headers=_firestore_headers(id_token),
+        json={"fields": {
+            "migratedAt": {
+                "timestampValue": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            }
+        }},
+        timeout=10,
+    )
+    _check_firestore_response(marker_response, "message retention migration")
+    _RETENTION_MIGRATED_USERS.add(user_id)
+
+
 def save_message(user_id: str, id_token: str,
                  role: str, content: str,
                  city: str = "", specialty: str = "") -> bool:
     """Save a single message (user or assistant) to Firestore."""
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     doc_id = uuid4().hex
 
     doc = {
@@ -169,9 +251,11 @@ def save_message(user_id: str, id_token: str,
             "city":      {"stringValue": city},
             "specialty": {"stringValue": specialty},
             "timestamp": {"stringValue": now},
+            "expiresAt": {"timestampValue": _message_expiration(now)},
         }
     }
 
+    _ensure_message_expirations(user_id, id_token)
     r = requests.post(
         f"{FIRESTORE_BASE}/users/{user_id}/messages",
         json=doc,
@@ -184,6 +268,7 @@ def save_message(user_id: str, id_token: str,
 
 
 def load_recent_messages(user_id: str, id_token: str, limit: int = 100) -> list[dict]:
+    _ensure_message_expirations(user_id, id_token)
     response = requests.get(
         f"{FIRESTORE_BASE}/users/{user_id}/messages",
         headers=_firestore_headers(id_token),
@@ -194,6 +279,8 @@ def load_recent_messages(user_id: str, id_token: str, limit: int = 100) -> list[
     messages = []
     for doc in response.json().get("documents", []):
         fields = doc.get("fields", {})
+        if _is_expired(fields.get("expiresAt", {}).get("timestampValue", "")):
+            continue
         messages.append({
             key: fields.get(key, {}).get("stringValue", "")
             for key in ("role", "content", "city", "specialty", "timestamp")
@@ -204,6 +291,7 @@ def load_recent_messages(user_id: str, id_token: str, limit: int = 100) -> list[
 
 def load_all_messages(user_id: str, id_token: str) -> list[dict]:
     """Load ALL messages for a user, sorted oldest first."""
+    _ensure_message_expirations(user_id, id_token)
     messages = []
     url = f"{FIRESTORE_BASE}/users/{user_id}/messages"
     params = {"pageSize": 1000}
@@ -213,6 +301,8 @@ def load_all_messages(user_id: str, id_token: str) -> list[dict]:
         data = response.json()
         for doc in data.get("documents", []):
             fields = doc.get("fields", {})
+            if _is_expired(fields.get("expiresAt", {}).get("timestampValue", "")):
+                continue
             messages.append({
                 key: fields.get(key, {}).get("stringValue", "")
                 for key in ("role", "content", "city", "specialty", "timestamp")

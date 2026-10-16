@@ -47,6 +47,14 @@ _MAX_CACHED_EXECUTORS = 128
 _doctor_search_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _create_executor = None  # Set in lifespan
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 
 @asynccontextmanager
@@ -73,8 +81,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production to your domain
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -236,7 +244,11 @@ def _get_auth(
     return {"user_id": verified_user_id, "id_token": x_id_token}
 
 
-def _get_or_create_executor(user_id: str, id_token: str):
+def _get_or_create_executor(
+    user_id: str,
+    id_token: str,
+    past_messages: list[dict] | None = None,
+):
     """Get cached executor or create new one with user's history."""
     executor = _executor_cache.get(user_id)
     if executor is not None:
@@ -244,7 +256,7 @@ def _get_or_create_executor(user_id: str, id_token: str):
         return executor
 
     # Use only recent context for the model; the complete history stays in Firestore.
-    past = load_recent_messages(user_id, id_token)
+    past = past_messages if past_messages is not None else load_recent_messages(user_id, id_token)
     executor = _create_executor(past_messages=past)
     executor._user_id = user_id
     _executor_cache[user_id] = executor
@@ -311,8 +323,11 @@ async def api_chat(req: ChatRequest, auth: dict = Depends(_get_auth)):
     user_id = auth["user_id"]
     id_token = auth["id_token"]
 
-    executor = _get_or_create_executor(user_id, id_token)
-    answer, _ = ask_question_cached(executor, req.message, user_id=user_id)
+    past = load_recent_messages(user_id, id_token)
+    executor = _get_or_create_executor(user_id, id_token, past)
+    answer, _ = ask_question_cached(
+        executor, req.message, user_id=user_id, past_messages=past
+    )
 
     specialty = _detect_specialty(req.message)
     language = detect_language(req.message)
@@ -350,8 +365,11 @@ async def api_voice_chat(
         raise HTTPException(status_code=400, detail=transcribed)
 
     # Chat with transcribed text
-    executor = _get_or_create_executor(user_id, id_token)
-    answer, _ = ask_question_cached(executor, transcribed, user_id=user_id)
+    past = load_recent_messages(user_id, id_token)
+    executor = _get_or_create_executor(user_id, id_token, past)
+    answer, _ = ask_question_cached(
+        executor, transcribed, user_id=user_id, past_messages=past
+    )
 
     specialty = _detect_specialty(transcribed)
     language = detect_language(transcribed)
@@ -398,9 +416,6 @@ async def api_image_analysis(
 
     if analysis.startswith("⚠️"):
         raise HTTPException(status_code=400, detail=analysis)
-
-    # Save lab report into persistent user memory
-    save_lab_report(user_id, analysis)
 
     # Save to Firestore
     q_text = question if question else f"[Uploaded image: {image.filename}]"

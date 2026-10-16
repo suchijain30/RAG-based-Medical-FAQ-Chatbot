@@ -643,10 +643,15 @@ def _direct_llm_answer(question: str, history_messages: list,
         return f"⚠️ Error: {str(e)}"
 
 
-def ask_question(question: str, user_id: str = "default_user", executor: AgentExecutor = None) -> tuple[str, list]:
+def ask_question(
+    question: str,
+    user_id: str = "default_user",
+    executor: AgentExecutor = None,
+    past_messages: list[dict] | None = None,
+) -> tuple[str, list]:
     """
-    Main query function with persistent JSON memory, lab report context injection,
-    history trimming (1800 token budget), and multi-turn chat history.
+    Answer using Firestore-supplied history for API requests or local JSON memory
+    for the legacy local app.
     """
     if executor is not None and callable(executor) and not hasattr(executor, "invoke"):
         try:
@@ -655,7 +660,18 @@ def ask_question(question: str, user_id: str = "default_user", executor: AgentEx
             pass
 
     corrected = fuzzy_correct(question)
-    memory = load_user_memory(user_id)
+    if past_messages is None:
+        memory = load_user_memory(user_id)
+    else:
+        memory = {
+            "profile": {"age": "", "gender": "", "conditions": []},
+            "lab_report": "",
+            "history": [
+                {"role": message.get("role", ""), "content": message.get("content", "")}
+                for message in past_messages
+                if message.get("role") in ("user", "assistant")
+            ],
+        }
 
     # 1. Auto-extract profile facts (age, gender, conditions)
     extract_profile_from_text(question, memory["profile"])
@@ -709,7 +725,8 @@ def ask_question(question: str, user_id: str = "default_user", executor: AgentEx
             )
         memory["history"].append({"role": "user", "content": question})
         memory["history"].append({"role": "assistant", "content": answer})
-        save_user_memory(user_id, memory)
+        if past_messages is None:
+            save_user_memory(user_id, memory)
         return answer, []
 
     effective_input = corrected
@@ -738,7 +755,8 @@ def ask_question(question: str, user_id: str = "default_user", executor: AgentEx
 
         memory["history"].append({"role": "user", "content": question})
         memory["history"].append({"role": "assistant", "content": answer})
-        save_user_memory(user_id, memory)
+        if past_messages is None:
+            save_user_memory(user_id, memory)
         return answer, []
 
     except RateLimitError:
@@ -751,13 +769,24 @@ def ask_question(question: str, user_id: str = "default_user", executor: AgentEx
             answer = _direct_llm_answer(effective_input, history_messages, user_context, lab_report)
             memory["history"].append({"role": "user", "content": question})
             memory["history"].append({"role": "assistant", "content": answer})
-            save_user_memory(user_id, memory)
+            if past_messages is None:
+                save_user_memory(user_id, memory)
             return answer, []
         return f"⚠️ Unexpected error: {err}", []
 
 
-def ask_question_cached(executor, question: str, user_id: str = "default_user") -> tuple[str, list]:
+def ask_question_cached(
+    executor,
+    question: str,
+    user_id: str = "default_user",
+    past_messages: list[dict] | None = None,
+) -> tuple[str, list]:
     """Backward-compatible wrapper around ask_question."""
     if hasattr(executor, "_user_id") and getattr(executor, "_user_id"):
         user_id = getattr(executor, "_user_id")
-    return ask_question(question=question, user_id=user_id, executor=executor)
+    return ask_question(
+        question=question,
+        user_id=user_id,
+        executor=executor,
+        past_messages=past_messages,
+    )

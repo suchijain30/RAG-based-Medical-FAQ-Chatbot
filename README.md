@@ -158,7 +158,7 @@ The React app uses Firebase Authentication email/password accounts. Its Firebase
 
 The backend uses `GROQ_API_KEY` for chat and image analysis, with `qwen/qwen3.8-27b` as the default Groq model. Set the optional backend environment variable `GROQ_MODEL` to select another model available to your Groq account; chat and image analysis use the same setting.
 
-Profile, chat, and symptom records are stored beneath each user's Firebase UID in Firestore. Publish the owner-only rules in [`firestore.rules`](./firestore.rules) in Firebase Console → Firestore Database → Rules before enabling the app; the rules permit users to read/write only their own records. For live doctor search, create a TomTom API key with Places Search API access and set `TOMTOM_API_KEY` as a **backend-only deployment secret**. Do not expose this key through a `VITE_` variable or commit it. The directory returns live provider listings and contact/map links; it does not provide appointment booking, ratings, or verified clinical credentials.
+Profile, chat, and symptom records are stored beneath each user's Firebase UID in Firestore, so chat history survives backend redeploys. Each message is stamped to expire 30 days after it was created. Publish the owner-only rules in [`firestore.rules`](./firestore.rules) in Firebase Console → Firestore Database → Rules, then create a Firestore TTL policy for collection group `messages` using timestamp field `expiresAt`. Firestore TTL deletion is asynchronous and typically completes within 24 hours after expiration; expired messages are hidden from API history immediately. Existing messages are backfilled with expiration timestamps the first time that user accesses chat or history after this update. For live doctor search, create a TomTom API key with Places Search API access and set `TOMTOM_API_KEY` as a **backend-only deployment secret**. Do not expose this key through a `VITE_` variable or commit it. The directory returns live provider listings and contact/map links; it does not provide appointment booking, ratings, or verified clinical credentials.
 
 ### Features & Screens:
 - 💬 **New Chat**: Multimodal medical consultations, image/lab report attachments, voice recording & transcription, clinical guideline recommendations, and nearby doctor referrals.
@@ -166,6 +166,20 @@ Profile, chat, and symptom records are stored beneath each user's Firebase UID i
 - 📍 **Doctor Search**: Live TomTom Places Search by profile city and optional specialty, with provider details and map links.
 - 📖 **Patient Guides**: Personalized structured recovery guides, nutritional protocols, mobility routines, and on-demand AI guide generation.
 - 👤 **Profile & Onboarding**: Signup collects name, date of birth, gender, and location; users can update them later. Light/dark theme preference is available in the header.
+
+---
+
+## Deploying with Vercel and Render
+
+The React frontend can run as a Vercel Vite project, and the FastAPI backend can run as a Render Python web service. The repository includes [`frontend/vercel.json`](./frontend/vercel.json) for client-side routing and [`render.yaml`](./render.yaml) for a free Render test service. The free service may sleep and may run out of memory while loading the ML dependencies and vector index; use a larger paid instance for production. In Vercel, import the repository and set the project root to `frontend`; use the Vite build defaults.
+
+Set these Vercel environment variables for Production and Preview as needed:
+- `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_APP_ID`, and optionally `FIREBASE_MEASUREMENT_ID`
+- `VITE_API_BASE_URL` to the Render API origin ending in `/api`, for example `https://your-api.onrender.com/api`
+
+In Render, create a Blueprint from the repository root and provide the prompted `FIREBASE_API_KEY`, `FIREBASE_PROJECT_ID`, and `GROQ_API_KEY` values. After Vercel assigns its domain, add `ALLOWED_ORIGINS` in Render with the exact frontend origin (no path or trailing slash). Add `TOMTOM_API_KEY` when doctor search is ready; `GROQ_MODEL` is optional and defaults to `qwen/qwen3.8-27b`. Never add backend secrets to Vercel `VITE_` variables or source control.
+
+After deployment, add the Vercel domain to Firebase Authentication's authorized domains, publish `firestore.rules`, and configure the `messages` / `expiresAt` TTL policy described above. From Google Cloud Shell, the policy can also be enabled with `gcloud firestore fields ttls update expiresAt --collection-group=messages --enable-ttl --project=YOUR_FIREBASE_PROJECT_ID`. Render's local filesystem is not the source of truth for conversation history; the API uses the user's authenticated Firestore history and does not persist API chat or image reports to local `user_memory` files.
 
 ---
 
